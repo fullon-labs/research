@@ -1,13 +1,13 @@
 ```mermaid
 gantt
-    title NPL Private Credit RWA Issuance Timeline (Start: 2025-09-14)
+    title NPL Private Credit RWA Issuance Timeline (Start: 2025-10-10)
     dateFormat  YYYY-MM-DD
     axisFormat  %m-%d
     section Company Setup
-    HK LPF (GP/LP)           :a1, 2025-09-14, 4w
-    Cayman Foundation        :a2, 2025-09-14, 4w
-    BVI (RWA Entity)         :a3, 2025-09-14, 4w
-    Lingang GP Prep          :a4, 2025-09-14, 4w
+    HK LPF (GP/LP)           :a1, 2025-10-10, 4w
+    Cayman Foundation        :a2, 2025-10-10, 4w
+    BVI (RWA Entity)         :a3, 2025-10-10, 4w
+    Lingang GP Prep          :a4, 2025-10-10, 4w
     section NPL Asset Audit
     Audit & Ant Chain Prep   :a5, after a1, 4w
     section QFLP Fund Setup
