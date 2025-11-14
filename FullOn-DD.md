@@ -7,81 +7,155 @@ applications such as Ink Finance, without embedding RWA economics into the nativ
 
 ## Governance & Protocol Evolution
 
-- • Describe the governance model (on-chain/off-chain, validator voting, foundation
-    oversight).
-- • How are protocol upgrades initiated and ratified? Can they occur without hard forks?
-- • What is the validator and token-holder participation rate in governance proposals?
-- • Assess the decentralization level — validator distribution, foundation dominance,
-    voting power concentration.
-- • Who controls the treasury and upgrade keys — is there multi-sig or DAO governance?
-- • What is the conflict-resolution mechanism for validator or community disputes?
-- • Is there a transparent framework for third-party infra (e.g., RWA apps) whitelisting or
-    inclusion?
+- Describe the governance model (on-chain/off-chain, validator voting, foundation oversight)
+**Answer**: 
 
+- How are protocol upgrades initiated and ratified? Can they occur without hard forks?
+**Answer**:
+  
+- What is the validator and token-holder participation rate in governance proposals?
+**Answer**:
+  
+- Assess the decentralization level — validator distribution, foundation dominance, voting power concentration
+**Answer**:
+  
+- Who controls the treasury and upgrade keys — is there multi-sig or DAO governance?
+**Answer**:
+  
+- What is the conflict-resolution mechanism for validator or community disputes?
+**Answer**:
+  
+- Is there a transparent framework for third-party infra (e.g., RWA apps) whitelisting or
+    inclusion?
+**Answer**:
+  
 ## Consensus Mechanism
 
-- • Specify the consensus algorithm (PoS, DPoS, BFT hybrid, etc.).
-- • What are the security assumptions (slashing rules, finality guarantees, honest-
-    majority thresholds)?
-- • Validator requirements — minimum stake, hardware specs, uptime penalties.
-- • How is validator centralization risk mitigated?
-- • Have there been chain halts or rollbacks, and how were they resolved?
-- • Are there third-party audits or formal verification reports for consensus logic?
+- Specify the consensus algorithm (PoS, DPoS, BFT hybrid, etc.).
+**Answer**: 
+
+- What are the security assumptions (slashing rules, finality guarantees, honest-majority thresholds)?
+**Answer**:
+
+- Validator requirements — minimum stake, hardware specs, uptime penalties.
+**Answer**:
+  
+- How is validator centralization risk mitigated?
+**Answer**:
+  
+- Have there been chain halts or rollbacks, and how were they resolved?
+**Answer**:
+  
+- Are there third-party audits or formal verification reports for consensus logic?
+**Answer**: 
 
 ## Blockchain Trilemma Evaluation
 
-- • Is validator set open and proportionally decentralized?
-- • What is total staked value vs. circulating supply?
-- • Average TPS, block time, gas cost, finality latency.
-- • How does the team justify its position on the trilemma spectrum?
-
+- Is validator set open and proportionally decentralized?
+**Answer**:
+  
+- What is total staked value vs. circulating supply?
+**Answer**:
+  
+- Average TPS, block time, gas cost, finality latency.
+**Answer**:
+  
+- How does the team justify its position on the trilemma spectrum?
+**Answer**:
+  
 ## Technical Maturity
 
-- • Is the codebase public with verifiable GitHub commits and contributions?
-- • Duration of mainnet uptime and history of incidents.
+- Is the codebase public with verifiable GitHub commits and contributions?
+**Answer**:
+  
+- Duration of mainnet uptime and history of incidents.
+**Answer**: 
 
+- Have multiple security audits been conducted and disclosed?
+**Answer**:
+  
+- Does the network have bug-bounty or incident-response programs?
+**Answer**:
 
-- • Have multiple security audits been conducted and disclosed?
-- • Does the network have bug-bounty or incident-response programs?
-- • Assess ease of node operation — documentation, tooling, community support.
-
+- Assess ease of node operation — documentation, tooling, community support.
+**Answer**:
+  
 ## Ecosystem & Developer Readiness
 
-- • Evaluate developer tools (SDKs, APIs, explorer, documentation quality).
-- • Confirm EVM wrapper stability and performance benchmarks.
-- • Inventory of existing dApps — are they producing real usage?
-- • Availability of bridges or interoperability layers with major ecosystems.
-- • List of oracles, indexers, custodians, or other infra partners.
-- • Review developer incentive programs, hackathons, or grant mechanisms.
+- Evaluate developer tools (SDKs, APIs, explorer, documentation quality).
+**Answer**:
+  
+- Confirm EVM wrapper stability and performance benchmarks.
+**Answer**:
+  
+- Inventory of existing dApps — are they producing real usage?
+**Answer**:
+  
+- Availability of bridges or interoperability layers with major ecosystems.
+**Answer**:
+  
+- List of oracles, indexers, custodians, or other infra partners.
+**Answer**:
+  
+- Review developer incentive programs, hackathons, or grant mechanisms.
 
 ## User Adoption & Market Positioning
 
-- • Number of active wallets and transactions (DAU/MAU trend).
-- • Geographic distribution of user base and validator nodes.
-- • Clarity of target audience (music IP players vs. general Web3 users).
-- • Quality of community engagement — Discord, GitHub, social channels.
-- • Marketing narrative and differentiation vs. competitors (Audius, Opus, etc.).
+- Number of active wallets and transactions (DAU/MAU trend).
+**Answer**:
+  
+- Geographic distribution of user base and validator nodes.
+**Answer**:
+  
+- Clarity of target audience (music IP players vs. general Web3 users).
+**Answer**:
+  
+- Quality of community engagement — Discord, GitHub, social channels.
+**Answer**:
+  
+- Marketing narrative and differentiation vs. competitors (Audius, Opus, etc.).
 
 ## Go-to-Market & Partnerships
 
-- • Identify strategic partnerships with labels, publishers, or tech providers.
-- • What is the BD and ecosystem fund structure (size, governance, deployment speed)?
-- • Presence of regional operating entities (HK, SG, US) for regulatory interface.
-- • Track record of media coverage and narrative control.
-- • Evaluate alignment between GTM strategy and institutional adoption goals.
+- Identify strategic partnerships with labels, publishers, or tech providers.
+**Answer**:
+  
+- What is the BD and ecosystem fund structure (size, governance, deployment speed)?
+**Answer**:
+  
+- Presence of regional operating entities (HK, SG, US) for regulatory interface.
+**Answer**:
+  
+- Track record of media coverage and narrative control.
+**Answer**:
+  
+- Evaluate alignment between GTM strategy and institutional adoption goals.
 
 ## Tokenomics & Indirect Value Capture
 
-- • Are all transactions payable exclusively in the native token?
-- • Is there a fee-burn mechanism, and what share of fees are burned vs. recycled?
-- • How are gas revenues distributed among validators and treasury?
-- • What safeguards exist if network usage declines — does the fee model remain
-    sustainable?
-- • What is the total stake ratio and minimum stake per validator?
-- • How are staking rewards funded (inflation, fees, or both)?
-- • Does token inflation exceed organic demand growth, causing dilution?
-- • How decentralized is validator ownership and what are slashing parameters?
+- Are all transactions payable exclusively in the native token?
+**Answer**:
+  
+- Is there a fee-burn mechanism, and what share of fees are burned vs. recycled?
+**Answer**:
+  
+- How are gas revenues distributed among validators and treasury?
+**Answer**:
+  
+- What safeguards exist if network usage declines — does the fee model remain sustainable?
+**Answer**:
 
+- What is the total stake ratio and minimum stake per validator?
+**Answer**:
+  
+- How are staking rewards funded (inflation, fees, or both)?
+**Answer**:
+  
+- Does token inflation exceed organic demand growth, causing dilution?
+**Answer**:
+  
+- How decentralized is validator ownership and what are slashing parameters?
+**Answer**: 
 
 - • How is the network treasury capitalized (emissions, penalties, redistributions)?
 - • Who controls treasury disbursement, and is it governed transparently?
