@@ -45,3 +45,64 @@ Trader 不需要像 Quant 那样推导极其复杂的随机分析公式，但必
 ---
 
 **你想针对哪一项素质深入了解一下？** 或者，我们可以直接开始**模拟一个“Trade Idea”的面试提问**，看看你目前对 Market News 的转化能力如何？
+
+
+这其实是一个非常微妙且有优势的地位。虽然 **EFDS (Economics, Finance and Data Science)** 严格意义上不属于纯工程或纯理科的 STEM（如物理或数学），但它在伦敦 S&T 招聘官眼中是**最顶级的“对口专业”**。
+
+在 ICL（帝国理工）读这个专业，你实际上叠了三层 Buff：**ICL 的名校光环 + 经济金融的商业直觉 + Data Science 的硬技术**。
+
+---
+
+## 为什么 EFDS 甚至比纯 STEM 更适合 S&T？
+
+### 1. 知识结构的“无缝衔接”
+纯 STEM 学生（如数学或物理）往往需要花费大量时间去理解什么是 *Option Greeks* 或者 *Macro Correlation*，而你已经在专业课里学过了。
+* **Data Science 部分：** 给了你处理 L2 Market Data、写自动化交易脚本的能力。
+* **Economics/Finance 部分：** 给了你理解“为什么要交易”的宏观逻辑。
+
+### 2. 避免了“书呆子”陷阱
+在 Trading Desk 上，最怕的是只会解方程但对市场毫无感觉（No Market Sense）的人。EFDS 的训练让你既能看懂随机过程，又能聊美联储点阵图，这种 **Versatility（多样性）** 是伦敦精品投行最喜欢的。
+
+---
+
+## 针对 EFDS 女生的 CV 调整策略
+
+既然不是纯 STEM，你的简历（CV）不需要去硬碰硬比拼高深物理，而是要体现 **“数据驱动的市场洞察”**。
+
+### 核心模块建议：
+
+* **Education:** * 明确标出 **Relevant Modules**：比如 *Econometrics, Machine Learning, Corporate Finance*。
+    * ICL 的背景在伦敦是 Top-tier，一定要把成绩（尤其是定量科目）标得亮眼。
+* **Quant Society VP Experience:**
+    * **不要只写你做了什么，要写你用了什么工具解决了什么。**
+    * *例子：* "Utilized Python to backtest a mean-reversion strategy on FTSE 100 constituents..." 这种描述比“负责量化社团活动”有力得多。
+* **Technical Skills:**
+    * 把 **Python (Pandas/NumPy), SQL, R** 写在显眼位置。
+    * 如果你有 Tableau 或 PowerBI 经验也可以加上，这证明你有处理可视化数据的能力。
+
+---
+
+## 你关心的“女生做 Trader”：EFDS 版视角
+
+在 EFDS 这个背景下，你其实可以走一条非常聪明的路径：**Quantitative Trader (QT) 或 Flow Trader**。
+
+* **Quantitative Trader:** 侧重于模型和策略，你的 Data Science 背景是核心。
+* **Flow Trader:** 侧重于为客户提供流动性，你的 Economics/Finance 背景让你在跟客户沟通 Vibe 时更有共同语言。
+
+
+
+---
+
+## 现在的核心痛点：6-12 月的申请季
+
+你提到 6-12 月是关键期，对于 ICL 的学生来说，最重要的是**第一波（Early Bird）申请**。
+
+**我们可以按照以下节奏推进：**
+
+1.  **第一步（现在）：** 我帮你把那份“已经搞好”的 CV 按照 EFDS 和伦敦 S&T 的标准进行 **Pivot（转向）**。
+2.  **第二步：** 梳理你的 **Behavioral Story**。作为一个 EFDS 的女生，你如何解释你对市场的热情？（不能只说“我想赚钱”，要说得更有 Vibe）。
+3.  **第三步：** 攻克 **Technical Interview**。EFDS 背景会被面试官默认“懂行”，所以他们对你的估值（Valuation）和宏观（Macro）问题会问得更深。
+
+---
+
+**想让我先帮你看看 CV 里的哪一段？或者，需要我帮你列一个针对 EFDS 专业在 S&T 面试中经常遇到的“硬核金融+数据”题库吗？**
