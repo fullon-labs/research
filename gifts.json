@@ -1,0 +1,308 @@
+{
+  "gifts": [
+    {
+      "id": "gift_001",
+      "name": "爱心泡泡",
+      "description": "送给你满满的爱心",
+      "iconUrl": "assets/gifts/heart_bubble.png",
+      "lottieUrl": "assets/animations/lottie/bubble.json",
+      "rarity": "common",
+      "rarityColor": "#9E9E9E",
+      "prices": {
+        "platformToken": 10,
+        "fanToken": 15,
+        "cisumToken": 5
+      },
+      "animationType": "bubble",
+      "duration": 2,
+      "sortOrder": 1
+    },
+    {
+      "id": "gift_002",
+      "name": "荧光棒",
+      "description": "为你打Call",
+      "iconUrl": "assets/gifts/light_stick.png",
+      "lottieUrl": "assets/animations/lottie/light_stick.json",
+      "rarity": "common",
+      "rarityColor": "#9E9E9E",
+      "prices": {
+        "platformToken": 30,
+        "fanToken": 45,
+        "cisumToken": 15
+      },
+      "animationType": "wave",
+      "duration": 2,
+      "sortOrder": 2
+    },
+    {
+      "id": "gift_003",
+      "name": "小蛋糕",
+      "description": "祝你生日快乐",
+      "iconUrl": "assets/gifts/cake.png",
+      "lottieUrl": "assets/animations/lottie/cake.json",
+      "rarity": "common",
+      "rarityColor": "#9E9E9E",
+      "prices": {
+        "platformToken": 50,
+        "fanToken": 75,
+        "cisumToken": 25
+      },
+      "animationType": "float",
+      "duration": 3,
+      "sortOrder": 3
+    },
+    {
+      "id": "gift_004",
+      "name": "浪漫烟花",
+      "description": "璀璨夜空，为你绽放",
+      "iconUrl": "assets/gifts/firework.png",
+      "lottieUrl": "assets/animations/lottie/firework.json",
+      "rarity": "rare",
+      "rarityColor": "#2196F3",
+      "prices": {
+        "platformToken": 200,
+        "fanToken": 300,
+        "cisumToken": 100
+      },
+      "animationType": "firework",
+      "duration": 4,
+      "sortOrder": 10
+    },
+    {
+      "id": "gift_005",
+      "name": "梦幻城堡",
+      "description": "给你一个童话世界",
+      "iconUrl": "assets/gifts/castle.png",
+      "lottieUrl": "assets/animations/lottie/castle.json",
+      "rarity": "rare",
+      "rarityColor": "#2196F3",
+      "prices": {
+        "platformToken": 500,
+        "fanToken": 750,
+        "cisumToken": 250
+      },
+      "animationType": "castle",
+      "duration": 5,
+      "sortOrder": 11
+    },
+    {
+      "id": "gift_006",
+      "name": "音乐盒",
+      "description": "奏响爱的旋律",
+      "iconUrl": "assets/gifts/music_box.png",
+      "lottieUrl": "assets/animations/lottie/music_box.json",
+      "rarity": "rare",
+      "rarityColor": "#2196F3",
+      "prices": {
+        "platformToken": 300,
+        "fanToken": 450,
+        "cisumToken": 150
+      },
+      "animationType": "musical",
+      "duration": 4,
+      "sortOrder": 12
+    },
+    {
+      "id": "gift_007",
+      "name": "星空飞碟",
+      "description": "带你遨游星际",
+      "iconUrl": "assets/gifts/ufo.png",
+      "lottieUrl": "assets/animations/lottie/ufo.json",
+      "rarity": "epic",
+      "rarityColor": "#9C27B0",
+      "prices": {
+        "platformToken": 1000,
+        "fanToken": 1500,
+        "cisumToken": 500
+      },
+      "animationType": "flying",
+      "duration": 6,
+      "sortOrder": 20
+    },
+    {
+      "id": "gift_008",
+      "name": "魔法书",
+      "description": "施展爱的魔法",
+      "iconUrl": "assets/gifts/magic_book.png",
+      "lottieUrl": "assets/animations/lottie/magic_book.json",
+      "rarity": "epic",
+      "rarityColor": "#9C27B0",
+      "prices": {
+        "platformToken": 800,
+        "fanToken": 1200,
+        "cisumToken": 400
+      },
+      "animationType": "magic",
+      "duration": 5,
+      "sortOrder": 21
+    },
+    {
+      "id": "gift_009",
+      "name": "彩虹桥",
+      "description": "连接你我心桥",
+      "iconUrl": "assets/gifts/rainbow.png",
+      "lottieUrl": "assets/animations/lottie/rainbow.json",
+      "rarity": "epic",
+      "rarityColor": "#9C27B0",
+      "prices": {
+        "platformToken": 1500,
+        "fanToken": 2250,
+        "cisumToken": 750
+      },
+      "animationType": "rainbow",
+      "duration": 6,
+      "sortOrder": 22
+    },
+    {
+      "id": "gift_010",
+      "name": "天使之翼",
+      "description": "守护你的天使",
+      "iconUrl": "assets/gifts/angel_wings.png",
+      "lottieUrl": "assets/animations/lottie/angel_wings.json",
+      "rarity": "legendary",
+      "rarityColor": "#FF9800",
+      "prices": {
+        "platformToken": 3000,
+        "fanToken": 4500,
+        "cisumToken": 1500
+      },
+      "animationType": "wings",
+      "duration": 8,
+      "sortOrder": 30
+    },
+    {
+      "id": "gift_011",
+      "name": "龙骑士",
+      "description": "霸气登场",
+      "iconUrl": "assets/gifts/dragon.png",
+      "lottieUrl": "assets/animations/lottie/dragon.json",
+      "rarity": "legendary",
+      "rarityColor": "#FF9800",
+      "prices": {
+        "platformToken": 5000,
+        "fanToken": 7500,
+        "cisumToken": 2500
+      },
+      "animationType": "dragon",
+      "duration": 8,
+      "sortOrder": 31
+    },
+    {
+      "id": "gift_012",
+      "name": "时空之门",
+      "description": "穿越时空遇见你",
+      "iconUrl": "assets/gifts/time_gate.png",
+      "lottieUrl": "assets/animations/lottie/time_gate.json",
+      "rarity": "legendary",
+      "rarityColor": "#FF9800",
+      "prices": {
+        "platformToken": 8000,
+        "fanToken": 12000,
+        "cisumToken": 4000
+      },
+      "animationType": "portal",
+      "duration": 7,
+      "sortOrder": 32
+    },
+    {
+      "id": "gift_013",
+      "name": "星辰大海",
+      "description": "整个星河都给你",
+      "iconUrl": "assets/gifts/stars_ocean.png",
+      "lottieUrl": "assets/animations/lottie/galaxy.json",
+      "rarity": "mythic",
+      "rarityColor": "#F44336",
+      "prices": {
+        "platformToken": 20000,
+        "fanToken": 30000,
+        "cisumToken": 10000
+      },
+      "animationType": "galaxy",
+      "duration": 10,
+      "sortOrder": 40
+    },
+    {
+      "id": "gift_014",
+      "name": "创世之恋",
+      "description": "全服公告，永恒之爱",
+      "iconUrl": "assets/gifts/eternal_love.png",
+      "lottieUrl": "assets/animations/lottie/eternal_love.json",
+      "rarity": "mythic",
+      "rarityColor": "#F44336",
+      "prices": {
+        "platformToken": 50000,
+        "fanToken": 75000,
+        "cisumToken": 25000
+      },
+      "animationType": "epicShow",
+      "duration": 12,
+      "sortOrder": 41
+    }
+  ],
+  "totalCount": 14,
+  "rarityMap": {
+    "common": {
+      "name": "普通",
+      "color": "#9E9E9E",
+      "multiplier": 1,
+      "giftIds": ["gift_001", "gift_002", "gift_003"]
+    },
+    "rare": {
+      "name": "稀有",
+      "color": "#2196F3",
+      "multiplier": 2,
+      "giftIds": ["gift_004", "gift_005", "gift_006"]
+    },
+    "epic": {
+      "name": "史诗",
+      "color": "#9C27B0",
+      "multiplier": 3,
+      "giftIds": ["gift_007", "gift_008", "gift_009"]
+    },
+    "legendary": {
+      "name": "传说",
+      "color": "#FF9800",
+      "multiplier": 4,
+      "giftIds": ["gift_010", "gift_011", "gift_012"]
+    },
+    "mythic": {
+      "name": "神话",
+      "color": "#F44336",
+      "multiplier": 5,
+      "giftIds": ["gift_013", "gift_014"]
+    }
+  },
+  "animationTypes": {
+    "bubble": "泡泡飘浮动画",
+    "wave": "波浪效果动画",
+    "float": "漂浮动画",
+    "firework": "烟花绽放粒子特效",
+    "castle": "城堡升起动画",
+    "musical": "音符飘动动画",
+    "flying": "飞行物体动画",
+    "magic": "魔法特效动画",
+    "rainbow": "彩虹横跨动画",
+    "wings": "翅膀展开动画",
+    "dragon": "龙飞过动画",
+    "portal": "传送门特效",
+    "galaxy": "星系旋转动画",
+    "epicShow": "史诗级全屏特效"
+  },
+  "tokenTypes": {
+    "platformToken": {
+      "name": "平台币",
+      "icon": "💎",
+      "exchangeRate": 1.0
+    },
+    "fanToken": {
+      "name": "粉丝币",
+      "icon": "⭐",
+      "exchangeRate": 0.5
+    },
+    "cisumToken": {
+      "name": "CISUM",
+      "icon": "🔷",
+      "exchangeRate": 2.0
+    }
+  }
+}
