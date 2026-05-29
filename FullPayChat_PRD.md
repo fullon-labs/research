@@ -1,3 +1,8 @@
+---
+layout: default
+title: FullOn Labs Research
+---
+
 # FullOn 公链去中心化付费聊天 APP 产品需求文档 (PRD)
 
 ## 1. 文档信息
