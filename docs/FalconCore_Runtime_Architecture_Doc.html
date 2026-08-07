@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FalconCore Runtime Architecture</title>
+<style>
+:root {
+  --bg:#fff; --card:#f8f9fa; --text:#1a1a2e; --muted:#495057; --border:#dee2e6;
+  --accent:#4361ee; --blue:#1d3557; --blue-bg:#e3f2fd; --green:#2d6a4f; --green-bg:#d8f3dc;
+  --purple:#7b2cbf; --purple-bg:#f3e8ff; --orange:#e76f51; --orange-bg:#ffddd2;
+  --red:#c1121f; --red-bg:#ffcdd2; --yellow:#856404; --yellow-bg:#fff3cd;
+}
+* { box-sizing:border-box; }
+body { max-width:1200px; margin:0 auto; padding:40px; color:var(--text); background:var(--bg); font:16px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; }
+h1 { margin:0 0 8px; color:var(--accent); font-size:2rem; }
+h2 { margin:52px 0 18px; padding-bottom:8px; border-bottom:2px solid var(--accent); font-size:1.5rem; }
+h3 { margin:32px 0 12px; color:var(--blue); font-size:1.2rem; }
+h4 { margin:22px 0 8px; color:var(--muted); }
+p { margin:10px 0; }
+ul,ol { margin:8px 0 8px 24px; }
+li { margin:4px 0; }
+code { padding:2px 6px; border-radius:4px; background:#e9ecef; font:0.88rem "SF Mono","Fira Code",monospace; }
+pre { overflow-x:auto; padding:16px 18px; border-radius:8px; color:#e2e2e2; background:#1a1a2e; font:0.85rem/1.55 "SF Mono","Fira Code",monospace; }
+table { width:100%; margin:16px 0; border:1px solid var(--border); border-spacing:0; border-radius:8px; overflow:hidden; font-size:0.9rem; }
+th { padding:10px 13px; color:#fff; background:var(--accent); text-align:left; }
+td { padding:10px 13px; border-bottom:1px solid var(--border); vertical-align:top; }
+tr:last-child td { border-bottom:0; }
+tr:nth-child(even) { background:var(--card); }
+.subtitle { margin-bottom:28px; color:var(--muted); }
+.note,.boundary,.summary { margin:16px 0; padding:13px 16px; border-radius:8px; }
+.note { border:1px solid #ffc107; color:var(--yellow); background:var(--yellow-bg); }
+.boundary { border:1px solid var(--red); color:#7f1d1d; background:#fff1f2; }
+.summary { border:1px solid var(--green); color:#184e3a; background:var(--green-bg); }
+.diagram { overflow-x:auto; margin:22px 0; padding:18px; border:1px solid var(--border); border-radius:10px; background:#fff; text-align:center; }
+.step { margin:10px 0; padding:13px 16px; border-left:4px solid var(--accent); border-radius:0 8px 8px 0; background:var(--card); }
+.tag { display:inline-block; padding:1px 7px; border-radius:10px; font-size:.78rem; font-weight:700; }
+.implemented { color:var(--green); background:var(--green-bg); }
+.conditional { color:var(--yellow); background:var(--yellow-bg); }
+.design { color:var(--red); background:var(--red-bg); }
+.small { color:var(--muted); font-size:.88rem; }
+</style>
+</head>
+<body>
+
+<h1>🦅 FalconCore Runtime Architecture</h1>
+<p class="subtitle">Agent 从配置、部署、认领 Run 到 Planner / Tool Loop 执行的统一说明<br>版本 v3.0｜2026-08-06｜以当前 <code>src/vnext/</code> 实现为准</p>
+
+<div class="summary"><strong>阅读主线：</strong>配置定义 Agent → Deployment 固定 revision → 外部平台启动 AgentInstance → Gateway 创建并分配 Run → Instance 认领并发起一次顶层执行 → Gateway 组装上下文并选择普通 Tool Loop 或 Persistent DAG Planner 路径 → 共享 Capability Dispatch → Instance 提交终态。</div>
+
+<div class="note"><strong>文档口径：</strong><span class="tag implemented">已实现</span> 表示当前代码路径；<span class="tag conditional">条件启用</span> 表示只有发布配置和本轮输入命中时生效；<span class="tag design">设计中</span> 表示不得按已上线能力理解。</div>
+
+<h2>一、架构总览与核心对象</h2>
+
+<h3>1.1 四个服务的职责边界</h3>
+<table>
+<tr><th>服务</th><th>负责</th><th>不负责</th><th>入口 / 标准 Compose 端口</th></tr>
+<tr><td><strong>ControlPlane</strong></td><td>Agent 配置、发布、Deployment、Provider/Secret 管理、Admin API；CLI 组合中可启用 Chat Facade</td><td>不执行模型循环，不管理 worker Pod 生命周期</td><td><code>startControlPlaneServer()</code><br>4010</td></tr>
+<tr><td><strong>RuntimeGateway</strong></td><td>Run ledger、调度、RuntimeBundle、Context、Planner、Tool Loop、Capability Dispatch、Provider、Transcript</td><td>不作为外部 worker，不直接创建 K8s/Docker 实例</td><td><code>startRuntimeGatewayServer()</code><br>API 4011；SSE 4012</td></tr>
+<tr><td><strong>AgentInstance</strong></td><td>注册/心跳、lease/capacity、拉取与认领 Run、取消监控、调用 Gateway 顶层接口、提交终态</td><td>不持有 RuntimeBundle 内容、Provider credential、PG/Redis 连接；不在本地实现 Agent Loop</td><td><code>startAgentInstanceServer()</code><br>health 4020</td></tr>
+<tr><td><strong>ChannelIngress</strong></td><td>Telegram 等通道入口、消息去重、delivery queue、路由到 RuntimeGateway</td><td>不执行 Agent</td><td><code>startChannelIngressServer()</code><br>4013</td></tr>
+</table>
+
+<div class="diagram">
+<svg viewBox="0 0 1000 420" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="a1" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#4361ee"/></marker></defs>
+  <rect x="25" y="85" width="130" height="50" rx="8" fill="#e3f2fd" stroke="#4361ee"/><text x="90" y="116" text-anchor="middle" font-size="12">Client / Channel</text>
+  <rect x="25" y="245" width="130" height="50" rx="8" fill="#f3e8ff" stroke="#7b2cbf"/><text x="90" y="276" text-anchor="middle" font-size="12">Admin UI</text>
+  <rect x="220" y="60" width="190" height="95" rx="8" fill="#d8f3dc" stroke="#2d6a4f" stroke-width="2"/><text x="315" y="90" text-anchor="middle" font-size="13" font-weight="700">RuntimeGateway</text><text x="315" y="112" text-anchor="middle" font-size="10">Run / Context / Planner / Loop</text><text x="315" y="130" text-anchor="middle" font-size="10">Provider / Capability / Transcript</text>
+  <rect x="220" y="235" width="190" height="75" rx="8" fill="#f3e8ff" stroke="#7b2cbf" stroke-width="2"/><text x="315" y="265" text-anchor="middle" font-size="13" font-weight="700">ControlPlane</text><text x="315" y="286" text-anchor="middle" font-size="10">Config / Publish / Deployment</text>
+  <rect x="500" y="45" width="200" height="125" rx="10" fill="#fff1f2" stroke="#e76f51" stroke-dasharray="6,4"/><text x="600" y="66" text-anchor="middle" font-size="9" fill="#e76f51">External K8s / Docker / Local</text><rect x="530" y="82" width="140" height="60" rx="7" fill="#ffddd2" stroke="#e76f51"/><text x="600" y="108" text-anchor="middle" font-size="12" font-weight="700">AgentInstance</text><text x="600" y="126" text-anchor="middle" font-size="9">register / pull / execute</text>
+  <rect x="790" y="60" width="170" height="95" rx="8" fill="#dbeafe" stroke="#1d3557"/><text x="875" y="91" text-anchor="middle" font-size="12" font-weight="700">Execution Backends</text><text x="875" y="112" text-anchor="middle" font-size="9">Model Provider</text><text x="875" y="130" text-anchor="middle" font-size="9">Local Executor / MCP / Provider</text>
+  <rect x="430" y="330" width="150" height="50" rx="8" fill="#e9ecef" stroke="#adb5bd"/><text x="505" y="361" text-anchor="middle" font-size="12">PostgreSQL</text>
+  <rect x="620" y="330" width="150" height="50" rx="8" fill="#e9ecef" stroke="#adb5bd"/><text x="695" y="361" text-anchor="middle" font-size="12">Redis</text>
+  <line x1="155" y1="110" x2="218" y2="110" stroke="#4361ee" stroke-width="2" marker-end="url(#a1)"/><line x1="155" y1="270" x2="218" y2="270" stroke="#4361ee" stroke-width="2" marker-end="url(#a1)"/>
+  <line x1="500" y1="110" x2="412" y2="110" stroke="#2d6a4f" stroke-width="2" marker-end="url(#a1)"/><text x="455" y="99" text-anchor="middle" font-size="8">Instance 发起请求</text>
+  <line x1="410" y1="95" x2="788" y2="95" stroke="#1d3557" stroke-width="2" marker-end="url(#a1)"/>
+  <line x1="315" y1="155" x2="480" y2="328" stroke="#adb5bd" stroke-dasharray="4,3"/><line x1="365" y1="310" x2="480" y2="330" stroke="#adb5bd" stroke-dasharray="4,3"/><line x1="380" y1="155" x2="675" y2="328" stroke="#adb5bd" stroke-dasharray="4,3"/>
+</svg>
+</div>
+
+<h3>1.2 六个核心对象</h3>
+<table>
+<tr><th>对象</th><th>含义</th><th>生命周期/所有者</th></tr>
+<tr><td><strong>AgentConfigSnapshot</strong></td><td>Prompt、Model、Tool/Skill exposure、runtime/memory/planner policy 的不可变 revision</td><td>ControlPlane 发布；Gateway 按 Run 固定 revision 读取</td></tr>
+<tr><td><strong>AgentDeployment</strong></td><td>把 agentId 固定到 configRevision，并声明 runtimeKind、capabilities、scaling 和启动模板</td><td>ControlPlane 保存 deployment intent；外部平台执行 manifest</td></tr>
+<tr><td><strong>AgentInstance</strong></td><td>通用 worker 会话，持有 lease、capacity、desiredConfigRevision readiness</td><td>外部进程；通过 Gateway 注册和心跳</td></tr>
+<tr><td><strong>RuntimeRun</strong></td><td>一次执行请求，包含 modality、session、attempt、assignment 和终态</td><td>RuntimeGateway / SessionRunLedger</td></tr>
+<tr><td><strong>RuntimeBundle</strong></td><td>当前 Run 固定 revision 的运行时契约</td><td>Gateway 构造；不下发 credential、PG/Redis URL 或配置内容给 Instance</td></tr>
+<tr><td><strong>Transcript</strong></td><td>用户、助手、Tool Call/Result/Error 等持久化证据</td><td>PostgreSQL；用于上下文、审计、回放和恢复</td></tr>
+</table>
+
+<div class="boundary"><strong>最重要的边界：</strong>Agent 是配置，不是进程；AgentInstance 是通用 worker，不是 Agent 的“智能大脑”。Prompt 装配、Planner、模型调用、Tool Loop、Capability Dispatch 都在 RuntimeGateway。</div>
+
+<h2>二、配置、部署与启动</h2>
+
+<h3>2.1 从 Agent 定义到可运行实例</h3>
+<pre>Draft AgentConfig
+  → publish immutable AgentConfigSnapshot(revision)
+  → create AgentDeployment(agentId + configRevision + runtime/scaling)
+  → generate Docker/K8s/local manifest
+  → external platform starts AgentInstance
+  → Instance register + heartbeat
+  → confirm desiredConfigRevision readiness
+  → Ready Instance can receive capacity reservations</pre>
+
+<p><code>markRuntimeBundleLoaded()</code> 是 readiness 状态标记，不表示 Instance 下载或持有 Prompt、Model、Tool 等 Bundle 内容。真正的 Bundle 仍由 Gateway 按 Run 构造。</p>
+
+<h3>2.2 冷启动顺序与保护语义</h3>
+<table>
+<tr><th>顺序</th><th>动作</th><th>为什么必须存在</th></tr>
+<tr><td>1</td><td>初始化 PostgreSQL stores、Redis online/capacity/streaming stores、Provider/Secret stores</td><td>调度、幂等和 active-active 事件不能依赖进程内临时状态</td></tr>
+<tr><td>2</td><td>组装 Capability Registry、Executor、MCP Provider</td><td>Run 开始前必须得到确定的有效 Capability directory</td></tr>
+<tr><td>3</td><td>启动 RuntimeGateway HTTP/SSE 与 reconciler/worker loops</td><td>先具备 Run、心跳和恢复能力，再接受 worker</td></tr>
+<tr><td>4</td><td>AgentInstance 注册，获得 sessionId/sessionToken、leaseDurationMs、desiredConfigRevision</td><td>建立认证、租约和 deployment 绑定</td></tr>
+<tr><td>5</td><td>Instance ready heartbeat 后递归轮询 assigned runs</td><td>避免未准备实例占用容量</td></tr>
+<tr><td>6</td><td>每个 Run 被 claim 后才启动 250ms cancellation monitor，Run 结束即停止</td><td>取消监控属于 attempt 生命周期，不是全局后台任务</td></tr>
+</table>
+
+<h2>三、一次 Run 的端到端生命周期</h2>
+
+<h3>3.1 唯一主流程</h3>
+<div class="step"><strong>① 入口与创建：</strong>Client 使用 <code>POST /runtime/runs</code>，或 Chat Facade 使用 <code>POST /v1/chat/stream</code>。Gateway 创建状态为 <code>queued</code> 的 Run，并写 SessionRunLedger。</div>
+<div class="step"><strong>② 分配：</strong>Gateway 根据 deployment、Ready Instance、HotSession sticky routing 和 Redis Lua capacity reservation 尝试分配。只有预留成功才进入 <code>assigned</code>；否则保持 queued 或返回 no_capacity。</div>
+<div class="step"><strong>③ 拉取与认领：</strong>Instance 调用 <code>/runtime/instances/:instanceId/runs/assigned</code> 拉取，再调用 <code>/runtime/runs/:runId/claim</code>。Gateway 校验 session、assignment 和 active attempt，状态进入 <code>running</code>。</div>
+<div class="step"><strong>④ 输入与上下文：</strong>text Run 先追加 <code>user_input</code> Transcript，再调用 <code>/context/assemble</code>。Instance 不在本地拼 Prompt。</div>
+<div class="step"><strong>⑤ 一次顶层执行：</strong>Instance 只调用一次 <code>/model/invoke</code> 或 <code>/model/stream</code>。多轮模型调用、Planner 和 Tool Loop 全部发生在 Gateway 内部。</div>
+<div class="step"><strong>⑥ 输出与完成：</strong>Gateway 返回最终结果；Instance 追加 <code>assistant_output</code>，再调用 <code>/complete</code>。Gateway 推进终态、释放 Redis capacity 并尝试 <code>drainQueuedRuns()</code>。</div>
+
+<h3>3.2 三种 modality</h3>
+<table>
+<tr><th>modality</th><th>Instance 路径</th><th>是否进入模型执行引擎</th></tr>
+<tr><td><code>text</code></td><td>user_input → context → model invoke/stream → assistant_output → complete</td><td>是；见第四章</td></tr>
+<tr><td><code>tool</code></td><td>直接调用 Run-scoped Tool HTTP proxy → complete</td><td>否；仍进入第五章的共享 Capability 安全管线</td></tr>
+<tr><td><code>skill</code></td><td>直接调用 Run-scoped Skill HTTP proxy → complete</td><td>否；仍受 registry/exposure/budget 约束</td></tr>
+</table>
+
+<h3>3.3 Context 的单一装配入口</h3>
+<p><code>TranscriptBackedRunContextAssembler.assemble()</code> 是模型可见上下文的唯一入口。它把持久化事实与本次模型窗口分开处理：</p>
+<ol>
+<li>读取有界、按 session/chatScope 过滤的 Transcript 候选窗口，并做 rollback、canonical attempt 和 incomplete-tool 清洗。</li>
+<li>按已发布策略条件性检索 UserPreferences 和 Memory；未启用 policy/retriever 时不参与。</li>
+<li>计算 <code>maxInputTokens = maxContextTokens - reservedOutputTokens - nativeToolContextTokens</code>。</li>
+<li>按 Prompt、当前用户输入、Preferences、Memory、History/Summary 的约束生成模型可见 messages。</li>
+<li>只有预算不足且存在 omitted history 时才进入 Compaction/Summary；可复用 replacement checkpoint。</li>
+<li>Tool schema 和 prompt-only Skill instructions 不由 Assembler 附加，而由后续执行引擎 payload builder 加入。</li>
+</ol>
+
+<h3>3.4 Chat SSE</h3>
+<p>Chat Facade 在执行期间并发桥接 Redis StreamingEventChannel，不是在 Run complete 后一次性回放。对外事件为 <code>started → activity/message → done</code>，失败时为 <code>error</code>；Provider 的 delta 是内部事件/字段。原始 <code>/runtime/runs</code> API 不自动返回 Chat SSE。</p>
+
+<h2>四、Agent 执行引擎：Planner 与 Tool Loop</h2>
+
+<h3>4.1 共同入口与模式判断</h3>
+<div class="diagram">
+<svg viewBox="0 0 1000 650" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="a2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#4361ee"/></marker></defs>
+  <rect x="270" y="20" width="460" height="58" rx="8" fill="#e3f2fd" stroke="#1d3557" stroke-width="2"/><text x="500" y="44" text-anchor="middle" font-size="13" font-weight="700">tryRunToolLoop()</text><text x="500" y="63" text-anchor="middle" font-size="9">native support → directory → pinned manifest → turn context</text>
+  <line x1="500" y1="78" x2="500" y2="112" stroke="#4361ee" stroke-width="2" marker-end="url(#a2)"/>
+  <polygon points="500,115 650,160 500,205 350,160" fill="#fff3cd" stroke="#f59f00" stroke-width="2"/><text x="500" y="154" text-anchor="middle" font-size="11" font-weight="700">Persistent DAG applies?</text><text x="500" y="173" text-anchor="middle" font-size="9">planner.mode=dag + definition 匹配 requestText</text>
+  <path d="M350 160 L200 160 L200 235" fill="none" stroke="#2d6a4f" stroke-width="2" marker-end="url(#a2)"/><text x="275" y="150" text-anchor="middle" font-size="10" fill="#2d6a4f">否：普通模式</text>
+  <rect x="35" y="237" width="330" height="120" rx="8" fill="#d8f3dc" stroke="#2d6a4f"/><text x="200" y="262" text-anchor="middle" font-size="12" font-weight="700">Main-model-owned Tool Loop</text><text x="200" y="285" text-anchor="middle" font-size="9">完整 executable directory</text><text x="200" y="304" text-anchor="middle" font-size="9">scopeDecision=undefined</text><text x="200" y="323" text-anchor="middle" font-size="9">model → calls → results → next step/finalize</text><text x="200" y="342" text-anchor="middle" font-size="9">默认最多 5 个 model steps</text>
+  <path d="M650 160 L800 160 L800 235" fill="none" stroke="#7b2cbf" stroke-width="2" marker-end="url(#a2)"/><text x="725" y="150" text-anchor="middle" font-size="10" fill="#7b2cbf">是：DAG 模式</text>
+  <rect x="635" y="237" width="330" height="120" rx="8" fill="#f3e8ff" stroke="#7b2cbf"/><text x="800" y="262" text-anchor="middle" font-size="12" font-weight="700">planRuntimeAgentStep(initial)</text><text x="800" y="285" text-anchor="middle" font-size="9">持久化 plan → current node / transition</text><text x="800" y="304" text-anchor="middle" font-size="9">scopeDecision + scopedDirectory</text><text x="800" y="323" text-anchor="middle" font-size="9">override / requireToolCall / fail-closed</text><text x="800" y="342" text-anchor="middle" font-size="9">单 Capability；禁止 parallel tools</text>
+  <line x1="800" y1="357" x2="800" y2="390" stroke="#7b2cbf" stroke-width="2" marker-end="url(#a2)"/>
+  <rect x="635" y="392" width="330" height="105" rx="8" fill="#fff1f2" stroke="#7b2cbf"/><text x="800" y="417" text-anchor="middle" font-size="12" font-weight="700">Scoped bounded Tool Loop</text><text x="800" y="440" text-anchor="middle" font-size="9">plannerNodeId + node dedupeScope + dispatch fence</text><text x="800" y="459" text-anchor="middle" font-size="9">result → node evidence → transition</text><text x="800" y="478" text-anchor="middle" font-size="9">planRuntimeAgentStep(replan) 或 terminal</text>
+  <path d="M965 445 L985 445 L985 295 L967 295" fill="none" stroke="#7b2cbf" stroke-dasharray="5,3" marker-end="url(#a2)"/>
+  <path d="M200 357 L200 545 L430 545" fill="none" stroke="#4361ee" stroke-width="2" marker-end="url(#a2)"/><path d="M800 497 L800 545 L570 545" fill="none" stroke="#4361ee" stroke-width="2" marker-end="url(#a2)"/>
+  <rect x="430" y="515" width="140" height="60" rx="8" fill="#e3f2fd" stroke="#1d3557"/><text x="500" y="540" text-anchor="middle" font-size="11" font-weight="700">共享出口</text><text x="500" y="559" text-anchor="middle" font-size="9">finalize / transforms</text>
+  <rect x="130" y="600" width="740" height="35" rx="6" fill="#fff3cd" stroke="#f59f00"/><text x="500" y="622" text-anchor="middle" font-size="9">Planner 决定 DAG scope；主模型在 scope 内调用；共享 Dispatch 独立执行 permission 与 write-intent 门控。</text>
+</svg>
+</div>
+
+<h3>4.2 普通模式</h3>
+<ul>
+<li>普通模式不调用 Planner。Gateway 将完整有效 Capability surface 暴露给主模型，决策所有者是 <code>main_model</code>。</li>
+<li>同一 model step 可以返回一批调用。只有 <code>allowParallelTools=true</code>、全部为 Tool、全部 readonly 且每个 Tool 声明支持并行时才并行；其他批次顺序执行。</li>
+<li>无 tool calls 不必然立即结束：可接受文本、执行零工具语义恢复、做一次 required-tool retry，或进入 post-tool finalization。</li>
+<li>Provider retry/failover 只允许在流提交前按既有策略进行；Tool retry 是第五章独立规则。</li>
+</ul>
+
+<h3>4.3 Persistent DAG 模式 <span class="tag conditional">条件启用</span></h3>
+<ul>
+<li>仅当发布的 <code>runtime.planner.mode="dag"</code> 且 DAG definition 适用于本轮 requestText 时启用。</li>
+<li>要求 Runtime Capability Registry、durable Transcript 和 authoritative Persistent DAG resolver；缺失时 fail closed。</li>
+<li>Planner 持久化 <code>RuntimePlannerDagPlanRecord</code>，steps 内嵌在单表 state JSONB；不是 ExecutionRun/Plan/Step 三表模型。</li>
+<li>Planner 输出当前 node 的 scope、override、requireToolCall 和边界；Tool result 作为 evidence 推进 transition/replan。</li>
+<li>DAG 要求单 Capability 执行，不允许 parallel tools；Planner admission/dispatch fence 不是用户写授权。</li>
+</ul>
+
+<h3>4.4 两条路径共享什么</h3>
+<p>两条路径都进入 <code>runBoundedNativeToolLoop()</code> 和第五章的单次 Tool Dispatch。Planner 只能收窄或强制当前 scope，不能绕过 schema、authoritative permission、write-intent、预算、Transcript、去重和错误分类。</p>
+
+<h2>五、Capability 与单次 Tool Dispatch</h2>
+
+<h3>5.1 Capability 从哪里来</h3>
+<table>
+<tr><th>来源</th><th>注册/暴露方式</th><th>执行方式</th></tr>
+<tr><td>内建 Tool</td><td>Capability definition + AgentConfig exposure + runtime availability</td><td>Local Executor 或 Provider adapter</td></tr>
+<tr><td>内建 Skill</td><td>executable Skill 或 prompt-only Skill</td><td><code>invokeSkill()</code>；prompt-only 只注入 instructions</td></tr>
+<tr><td>MCP Tool</td><td>启动期 eager discovery/注册；每个 Run 按 agent/role allow/deny 动态追加 exposure</td><td>与内建 Tool 共用 Dispatch，最终调用 MCP provider</td></tr>
+<tr><td>subagents / sessions_spawn</td><td>已注册能力；为同一 Agent 派生带角色覆盖的隔离子会话</td><td>不是调用另一个固定 Agent Deployment</td></tr>
+<tr><td>CallableAgent</td><td><span class="tag design">设计中</span></td><td>当前不可按已落地跨 Agent RPC 使用</td></tr>
+</table>
+
+<p>MCP 当前支持 <code>stdio</code> 和 <code>streamable-http</code>；配置来自 <code>FALCONCORE_MCP_SERVERS_JSON</code>，不属于 AgentConfig。safe name 使用 <code>server__tool</code> 形式，真正调用时再映射回原始 toolName。</p>
+
+<h3>5.2 单次 Dispatch 的权威顺序</h3>
+<table>
+<tr><th>阶段</th><th>真实行为</th><th>失败语义</th></tr>
+<tr><td>1. Capability match</td><td>在已经物化并暴露给本轮模型的 native surface 按 name 匹配，再加载 Registry definition</td><td>未注册/未暴露 → <code>TOOL_CALL_REJECTED</code></td></tr>
+<tr><td>2. Arguments/schema</td><td>规范化参数并按 inputSchema 校验；Provider tool call 在允许时可做一次有界修正</td><td>仍不合法 → REJECTED</td></tr>
+<tr><td>3. Permission/intent</td><td>Registry definition + pinned exposure 解析 authoritative permission；write/dangerous 需要绑定 runId、toolName、本轮 requesterText 的 writeIntentGrant，并检查负向意图、非空写参数和 required inputs</td><td>任一条件失败 → REJECTED</td></tr>
+<tr><td>4. Transcript identity</td><td>校验 toolCallId identity/conflict；readonly completed 结果可以回放</td><td>冲突或非只读重复 → <code>DUPLICATE_TOOL_CALL_BLOCKED</code></td></tr>
+<tr><td>5. Admission</td><td>普通模式非 readonly Tool 获取 durable claim；readonly/Skill 跳过。Persistent DAG 改用 planner fence</td><td>claim 冲突/不可确认 → fail closed</td></tr>
+<tr><td>6. Before execute</td><td>reserve in-flight counter、append <code>tool.call</code>；有 claim 时标记 dispatching</td><td>预算或持久化失败时不执行 Capability</td></tr>
+<tr><td>7. Execute/classify</td><td>Tool → Provider/CapabilityExecutor；Skill → invokeSkill；完成后 commit/rollback counter</td><td>按 transient/permanent/unknown_write_outcome 分类</td></tr>
+<tr><td>8. Evidence/result</td><td>追加 <code>tool.result</code> 或 <code>tool.error</code>，更新 claim 终态并格式化回传模型</td><td>由 failurePolicy 决定继续、收尾或终止</td></tr>
+</table>
+
+<h3>5.3 Durable claim、retry 与未知写结果</h3>
+<ul>
+<li>普通模式的非 readonly Tool 使用独立表 <code>falconcore_runtime_tool_dispatch_claims</code>；claim identity 为 runId + toolName + dedupeScope + normalized arguments，不含 toolCallId。</li>
+<li>readonly Tool 只有在 runtime retry policy 已配置且错误可重试时才重试，<code>maxAttempts</code> 封顶 3；write/dangerous 只尝试一次。</li>
+<li>超时来自 Capability exposure 的 <code>timeoutMs</code> 与 Run deadline，不存在统一默认 <code>maxToolMs</code>。</li>
+<li>非只读调用 dispatch 后被取消时可能成为 <code>unknown_outcome</code>：禁止自动重试，Run 失败，durable claim 保持待对账状态。</li>
+</ul>
+
+<h2>六、Provider 调用与流式边界</h2>
+
+<h3>6.1 Route、Binding 与 failover</h3>
+<p>Gateway 在实际 Provider 调用阶段解析 binding 和 credential；RuntimeBundle 不包含 credential。候选按 RouteConfig 和 providerBindingRefs 顺序遍历，并校验 modality、availability 和 quota。</p>
+<table>
+<tr><th>错误分类</th><th>行为</th></tr>
+<tr><td><code>request</code></td><td>请求内容错误，立即抛出，不切换候选</td></tr>
+<tr><td><code>account</code> / <code>model</code> / <code>binding</code></td><td>记录对应层级不可用，并跳过同层候选</td></tr>
+<tr><td><code>transient</code></td><td>网络、5xx、429、并发限制、断路器等，可继续下一个候选</td></tr>
+<tr><td>stream committed / abort / quota terminal</td><td>禁止继续 failover，避免重复或破坏流语义</td></tr>
+</table>
+
+<h3>6.2 两层资源保护</h3>
+<table>
+<tr><th>层</th><th>作用域</th><th>保护</th></tr>
+<tr><td><strong>ProviderOperationGuard</strong></td><td>provider + account</td><td>并发、排队、等待上限、transient circuit breaker、create-stage bounded retry</td></tr>
+<tr><td><strong>ProviderQuotaGate</strong></td><td>binding</td><td>binding-scoped concurrency 和 rate admission</td></tr>
+</table>
+
+<div class="boundary"><strong>不要混淆三种 retry：</strong>Provider create-stage retry、Provider binding failover、readonly Tool retry 是三套不同机制；它们的作用域、停止条件和副作用风险不同。</div>
+
+<h2>七、Run 状态机、并发与故障恢复</h2>
+
+<h3>7.1 状态生命周期</h3>
+<pre>queued
+  └─ capacity reserved → assigned
+       └─ active Instance claim → running
+            ├─ normal completion → completed
+            ├─ execution failure → failed
+            ├─ explicit cancellation → cancelled
+            ├─ terminal recovery decision → interrupted
+            └─ lease lost → recovery_pending → queued（最多一次恢复）</pre>
+
+<p><code>completed</code>、<code>failed</code>、<code>interrupted</code>、<code>cancelled</code> 是不可逆终态。迟到结果可以作为审计证据保存，但不能重新推进 Run。</p>
+
+<h3>7.2 并发一致性保护</h3>
+<table>
+<tr><th>风险</th><th>保护</th></tr>
+<tr><td>两个 Gateway 同时分配容量</td><td>Redis Lua 原子 reserve/release；assignment 写入 SessionRunLedger</td></tr>
+<tr><td>旧 Instance/旧 attempt 提交结果</td><td>session ownership + activeAttemptId 校验</td></tr>
+<tr><td>worker 崩溃后重复执行</td><td>lease reconciler、recovery count、Transcript identity、非只读 durable claim / DAG fence</td></tr>
+<tr><td>并行写扩大副作用</td><td>write/dangerous 顺序执行；DAG 禁止 parallel tools</td></tr>
+<tr><td>取消与 Tool dispatch 竞争</td><td>执行前可取消 claim；dispatch 后非只读结果不确定时进入 unknown_outcome</td></tr>
+<tr><td>多 Gateway SSE</td><td>Redis StreamingEventChannel；终态事件和 Run ledger 共同约束结束语义</td></tr>
+</table>
+
+<h3>7.3 Recovery 边界</h3>
+<ul>
+<li>running Run 的 Instance lease 过期后可进入 <code>recovery_pending</code>，随后由 recovery 流程重新进入 queued。</li>
+<li>同一 Run 再次丢失 Instance 时进入 terminal interrupted，避免无限恢复和资源放大。</li>
+<li>普通执行 attempt 的上限不是无条件 claim retry；第二次 attempt 只用于特定 requeue/recovery 路径。</li>
+<li>任何恢复都不能自动重试 unresolved non-readonly side effect。</li>
+</ul>
+
+<h2>八、持久化职责与代码索引</h2>
+
+<h3>8.1 PostgreSQL 与 Redis</h3>
+<table>
+<tr><th>存储</th><th>权威数据</th><th>不应承担</th></tr>
+<tr><td><strong>PostgreSQL</strong></td><td>Agent snapshots/deployments、RuntimeRun/attempt、Transcript、Planner DAG plan、durable tool-dispatch claims、Memory/UserPreferences、Channel delivery/audit</td><td>高频 lease 心跳和容量计数</td></tr>
+<tr><td><strong>Redis</strong></td><td>Instance online/lease/capacity、HotSession、StreamingEventChannel、短期 completion signal/coordination</td><td>不可替代 Run/Transcript/claim 的持久化事实</td></tr>
+</table>
+
+<h3>8.2 关键代码入口</h3>
+<table>
+<tr><th>领域</th><th>文件</th><th>关键入口</th></tr>
+<tr><td>服务入口</td><td><code>src/control-plane-server.ts</code><br><code>src/runtime-gateway-server.ts</code><br><code>src/agent-instance-server.ts</code><br><code>src/channel-ingress-server.ts</code></td><td>各 <code>start*Server()</code></td></tr>
+<tr><td>Run 调度</td><td><code>runtime-gateway/application/runtime-gateway.ts</code><br><code>session-run-ledger.ts</code></td><td><code>createRun()</code>、assign/claim/complete</td></tr>
+<tr><td>Instance</td><td><code>agent-instance/application/agent-instance-runtime.ts</code></td><td><code>executeAssignedRun()</code></td></tr>
+<tr><td>Context</td><td><code>runtime-gateway/application/session-context-assembler.ts</code></td><td><code>TranscriptBackedRunContextAssembler.assemble()</code></td></tr>
+<tr><td>执行入口</td><td><code>runtime-tool-loop-orchestrator.ts</code></td><td><code>tryRunToolLoop()</code>、<code>runBoundedNativeToolLoop()</code></td></tr>
+<tr><td>Planner</td><td><code>runtime-agent-planner.ts</code><br><code>planner/application/runtime-planner-dag-*</code></td><td><code>planRuntimeAgentStep()</code>、DAG resolve/transition</td></tr>
+<tr><td>Capability</td><td><code>runtime-capability-execution-service.ts</code><br><code>capabilities/application/tool-skill-*</code></td><td><code>dispatchNativeToolCall()</code>、Registry/Executor</td></tr>
+<tr><td>Provider</td><td><code>runtime-gateway/adapters/default-provider-adapter.ts</code><br><code>provider-operation-retry.ts</code><br><code>provider-quota-gate.ts</code></td><td>route/failover/guard/quota</td></tr>
+<tr><td>MCP</td><td><code>capabilities/mcp/mcp-capability-provider.ts</code><br><code>mcp-runtime-exposure.ts</code></td><td>discovery、safe name、per-Run exposure、execute</td></tr>
+</table>
+
+<h3>8.3 已实现与设计边界</h3>
+<table>
+<tr><th>能力</th><th>状态</th><th>准确口径</th></tr>
+<tr><td>普通主模型 Tool Loop</td><td><span class="tag implemented">已实现</span></td><td>默认执行模式；主模型拥有 Capability 选择权</td></tr>
+<tr><td>Persistent DAG Planner</td><td><span class="tag conditional">条件启用</span></td><td>已实现；发布配置和本轮请求命中才执行</td></tr>
+<tr><td>MCP、subagents/sessions_spawn</td><td><span class="tag implemented">已实现</span></td><td>共享 Capability 执行管线</td></tr>
+<tr><td>ExecutionRun/Plan/Step 三表 Planned 模式</td><td><span class="tag design">设计中</span></td><td>当前 DAG 不是该数据模型</td></tr>
+<tr><td>固定目标 Deployment 的 CallableAgent RPC</td><td><span class="tag design">设计中</span></td><td>不得与当前 subagent 派生会话混同</td></tr>
+</table>
+
+<hr style="margin:48px 0 24px;border:0;border-top:2px solid var(--border)">
+<p class="small" style="text-align:center">FalconCore Runtime Architecture｜本文档描述当前代码行为；设计稿能力已单独标记。</p>
+
+</body>
+</html>
