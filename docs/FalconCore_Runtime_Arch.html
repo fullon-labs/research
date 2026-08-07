@@ -46,7 +46,7 @@ tr:nth-child(even) { background:var(--card); }
 <h1>🦅 FalconCore Runtime Architecture</h1>
 <p class="subtitle">Agent 从配置、部署、认领 Run 到 Planner / Tool Loop 执行的统一说明<br>版本 v3.0｜2026-08-06｜以当前 <code>src/vnext/</code> 实现为准</p>
 
-<div class="summary"><strong>阅读主线：</strong>配置定义 Agent → Deployment 固定 revision → 外部平台启动 AgentInstance → Gateway 创建并分配 Run → Instance 认领并发起一次顶层执行 → Gateway 组装上下文并选择普通 Tool Loop 或 Persistent DAG Planner 路径 → 共享 Capability Dispatch → Instance 提交终态。</div>
+<div class="summary"><strong>阅读主线：</strong>配置定义 Agent → Deployment 固定 revision → 外部平台启动 AgentInstance → Gateway 创建并分配 Run → Instance 认领并发起一次顶层执行 → Gateway 组装上下文，由 RuntimeToolLoopOrchestrator 承载普通 Tool Loop 或适用的 Persistent DAG 分支 → 共享 Capability Dispatch → Instance 提交终态。</div>
 
 <div class="note"><strong>文档口径：</strong><span class="tag implemented">已实现</span> 表示当前代码路径；<span class="tag conditional">条件启用</span> 表示只有发布配置和本轮输入命中时生效；<span class="tag design">设计中</span> 表示不得按已上线能力理解。</div>
 
@@ -143,7 +143,7 @@ tr:nth-child(even) { background:var(--card); }
 <li>计算 <code>maxInputTokens = maxContextTokens - reservedOutputTokens - nativeToolContextTokens</code>。</li>
 <li>按 Prompt、当前用户输入、Preferences、Memory、History/Summary 的约束生成模型可见 messages。</li>
 <li>只有预算不足且存在 omitted history 时才进入 Compaction/Summary；可复用 replacement checkpoint。</li>
-<li>Tool schema 和 prompt-only Skill instructions 不由 Assembler 附加，而由后续执行引擎 payload builder 加入。</li>
+<li>Tool/可调用 Skill 的 native schema 和 prompt-bearing Skill instructions 不由 Assembler 附加；它们在第四章的 Agent Invocation 执行链中按当前 scope 分别进入 native capability 与 system-message 通道。</li>
 </ol>
 
 <h3>3.4 Chat SSE</h3>
@@ -151,45 +151,155 @@ tr:nth-child(even) { background:var(--card); }
 
 <h2>四、Agent 执行引擎：Planner 与 Tool Loop</h2>
 
-<h3>4.1 共同入口与模式判断</h3>
+<h3>4.0 先区分展示计划、作用域解析与真实执行</h3>
+<p>本文中的“计划”可能指展示层计划、Runtime 作用域决策或 Persistent DAG 状态，三者不能混用。尤其是 <code>update_plan</code> 只更新用户可见的执行流程/计划状态，不创建、推进或恢复 FalconCore Runtime 的 DAG plan，也不参与 Tool/Skill 的真实调度。</p>
+<table>
+<tr><th>概念</th><th>当前职责</th><th>是否参与真实调度</th></tr>
+<tr><td><strong><code>update_plan</code></strong></td><td>展示执行流程、步骤状态和进度</td><td>否；不决定模型调用、Tool/Skill scope 或 DAG transition</td></tr>
+<tr><td><strong>普通 Tool Loop</strong></td><td>没有匹配 Persistent DAG 时，向模型提供完整有效 Capability surface，由模型决定调用哪些 Tool/Skill、使用什么参数以及何时结束</td><td>是；负责实际模型调用和 Capability 执行循环</td></tr>
+<tr><td><strong>RuntimeAgentPlanner / DAG resolver</strong></td><td>开启并匹配 DAG 后，根据固定 DAG definition 与当前持久化 DAG state，解析当前 node、transition 和允许暴露的 Capability scope</td><td>是，但只负责固定 DAG 下的状态推进与作用域约束；不自由规划 Tool Loop</td></tr>
+<tr><td><strong>DAG scope 下的 Tool Loop</strong></td><td>接收 resolver 给出的当前 node scope，在该范围内完成模型调用、Tool/Skill 调用、结果回灌和收尾</td><td>是；复用普通 Tool Loop 的执行能力，但不能越过当前 scope</td></tr>
+</table>
+<div class="boundary"><strong>一句话口径：</strong><code>update_plan</code> 负责展示计划；普通情况走 Tool Loop；DAG 情况下，RuntimeAgentPlanner/DAG resolver 先按固定 definition 与持久化 state 限定当前步骤的 tool scope，再交给 Tool Loop 执行。</div>
+
+<h3>4.1 当前代码关系：Orchestrator 承载普通 Tool Loop 与 Persistent DAG 分支</h3>
+<table>
+<tr><th>组件</th><th>当前代码职责</th><th>边界</th></tr>
+<tr><td><strong>RuntimeRunProxy</strong></td><td>解析并校验本次 RuntimeRun，先尝试 <code>tryRunToolLoop()</code>；未处理才进入 Provider-only</td><td>不生成 DAG definition，不推进 DAG node</td></tr>
+<tr><td><strong>RuntimeToolLoopOrchestrator</strong></td><td>承载 preflight、普通主模型 Tool Loop，以及适用时的 Persistent DAG 分支</td><td>承载 DAG 不等于 DAG 就是普通 Tool Loop</td></tr>
+<tr><td><strong>普通 Tool Loop 分支</strong></td><td>没有匹配 DAG 时，将完整 executable directory 交给主模型，由模型决定调用、参数、继续或结束</td><td>没有 DAG plan/node/claim/transition</td></tr>
+<tr><td><strong>Persistent DAG 分支</strong></td><td>开启并匹配 DAG 后，RuntimeAgentPlanner/DAG resolver 按固定 definition 与当前持久化 state 解析当前 node 和受限 Capability scope，再复用 bounded Tool Loop 执行</td><td>不是独立 Planner Runtime，不动态生成完整 plan，也不自由规划 Tool Loop</td></tr>
+<tr><td><strong>Shared Capability Dispatch</strong></td><td>统一执行 schema、authoritative permission、当前轮 write-intent、budget、dedupe、Transcript 与 Provider dispatch</td><td>DAG admission 不能替代用户写授权</td></tr>
+</table>
+
+<div class="boundary"><strong>准确表述：</strong>DAG 当前由 Tool Loop Orchestrator 承载和驱动，但不是普通 Tool Loop 本体。它有独立 definition、plan store、node state、claim、transition、recovery 和 dispatch fence，只在执行当前 node 的 Capability 时复用共享 bounded Tool Loop。</div>
 <div class="diagram">
-<svg viewBox="0 0 1000 650" xmlns="http://www.w3.org/2000/svg">
+<svg viewBox="0 0 1000 700" xmlns="http://www.w3.org/2000/svg">
   <defs><marker id="a2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#4361ee"/></marker></defs>
-  <rect x="270" y="20" width="460" height="58" rx="8" fill="#e3f2fd" stroke="#1d3557" stroke-width="2"/><text x="500" y="44" text-anchor="middle" font-size="13" font-weight="700">tryRunToolLoop()</text><text x="500" y="63" text-anchor="middle" font-size="9">native support → directory → pinned manifest → turn context</text>
-  <line x1="500" y1="78" x2="500" y2="112" stroke="#4361ee" stroke-width="2" marker-end="url(#a2)"/>
-  <polygon points="500,115 650,160 500,205 350,160" fill="#fff3cd" stroke="#f59f00" stroke-width="2"/><text x="500" y="154" text-anchor="middle" font-size="11" font-weight="700">Persistent DAG applies?</text><text x="500" y="173" text-anchor="middle" font-size="9">planner.mode=dag + definition 匹配 requestText</text>
-  <path d="M350 160 L200 160 L200 235" fill="none" stroke="#2d6a4f" stroke-width="2" marker-end="url(#a2)"/><text x="275" y="150" text-anchor="middle" font-size="10" fill="#2d6a4f">否：普通模式</text>
-  <rect x="35" y="237" width="330" height="120" rx="8" fill="#d8f3dc" stroke="#2d6a4f"/><text x="200" y="262" text-anchor="middle" font-size="12" font-weight="700">Main-model-owned Tool Loop</text><text x="200" y="285" text-anchor="middle" font-size="9">完整 executable directory</text><text x="200" y="304" text-anchor="middle" font-size="9">scopeDecision=undefined</text><text x="200" y="323" text-anchor="middle" font-size="9">model → calls → results → next step/finalize</text><text x="200" y="342" text-anchor="middle" font-size="9">默认最多 5 个 model steps</text>
-  <path d="M650 160 L800 160 L800 235" fill="none" stroke="#7b2cbf" stroke-width="2" marker-end="url(#a2)"/><text x="725" y="150" text-anchor="middle" font-size="10" fill="#7b2cbf">是：DAG 模式</text>
-  <rect x="635" y="237" width="330" height="120" rx="8" fill="#f3e8ff" stroke="#7b2cbf"/><text x="800" y="262" text-anchor="middle" font-size="12" font-weight="700">planRuntimeAgentStep(initial)</text><text x="800" y="285" text-anchor="middle" font-size="9">持久化 plan → current node / transition</text><text x="800" y="304" text-anchor="middle" font-size="9">scopeDecision + scopedDirectory</text><text x="800" y="323" text-anchor="middle" font-size="9">override / requireToolCall / fail-closed</text><text x="800" y="342" text-anchor="middle" font-size="9">单 Capability；禁止 parallel tools</text>
-  <line x1="800" y1="357" x2="800" y2="390" stroke="#7b2cbf" stroke-width="2" marker-end="url(#a2)"/>
-  <rect x="635" y="392" width="330" height="105" rx="8" fill="#fff1f2" stroke="#7b2cbf"/><text x="800" y="417" text-anchor="middle" font-size="12" font-weight="700">Scoped bounded Tool Loop</text><text x="800" y="440" text-anchor="middle" font-size="9">plannerNodeId + node dedupeScope + dispatch fence</text><text x="800" y="459" text-anchor="middle" font-size="9">result → node evidence → transition</text><text x="800" y="478" text-anchor="middle" font-size="9">planRuntimeAgentStep(replan) 或 terminal</text>
-  <path d="M965 445 L985 445 L985 295 L967 295" fill="none" stroke="#7b2cbf" stroke-dasharray="5,3" marker-end="url(#a2)"/>
-  <path d="M200 357 L200 545 L430 545" fill="none" stroke="#4361ee" stroke-width="2" marker-end="url(#a2)"/><path d="M800 497 L800 545 L570 545" fill="none" stroke="#4361ee" stroke-width="2" marker-end="url(#a2)"/>
-  <rect x="430" y="515" width="140" height="60" rx="8" fill="#e3f2fd" stroke="#1d3557"/><text x="500" y="540" text-anchor="middle" font-size="11" font-weight="700">共享出口</text><text x="500" y="559" text-anchor="middle" font-size="9">finalize / transforms</text>
-  <rect x="130" y="600" width="740" height="35" rx="6" fill="#fff3cd" stroke="#f59f00"/><text x="500" y="622" text-anchor="middle" font-size="9">Planner 决定 DAG scope；主模型在 scope 内调用；共享 Dispatch 独立执行 permission 与 write-intent 门控。</text>
+  <rect x="330" y="20" width="340" height="58" rx="8" fill="#e3f2fd" stroke="#1d3557" stroke-width="2"/><text x="500" y="44" text-anchor="middle" font-size="12" font-weight="700">RuntimeRunProxy.invokeModel/streamModel</text><text x="500" y="63" text-anchor="middle" font-size="9">resolveOwnedRun → tryRunToolLoop</text>
+  <line x1="500" y1="78" x2="500" y2="110" stroke="#4361ee" stroke-width="2" marker-end="url(#a2)"/>
+  <rect x="285" y="112" width="430" height="72" rx="8" fill="#d8f3dc" stroke="#2d6a4f" stroke-width="2"/><text x="500" y="137" text-anchor="middle" font-size="12" font-weight="700">RuntimeToolLoopOrchestrator preflight</text><text x="500" y="158" text-anchor="middle" font-size="9">requestText / native support / Registry / effective directory / turn context</text><text x="500" y="176" text-anchor="middle" font-size="9">DAG 额外要求 durable Transcript，且禁止 parallel tools</text>
+  <line x1="500" y1="184" x2="500" y2="214" stroke="#4361ee" stroke-width="2" marker-end="url(#a2)"/>
+  <polygon points="500,217 650,260 500,303 350,260" fill="#fff3cd" stroke="#f59f00" stroke-width="2"/><text x="500" y="256" text-anchor="middle" font-size="11" font-weight="700">Persistent DAG applicable?</text><text x="500" y="275" text-anchor="middle" font-size="9">bundle.planner.mode=dag + definition 匹配 requestText</text>
+  <path d="M350 260 L190 260 L190 350" fill="none" stroke="#2d6a4f" stroke-width="2" marker-end="url(#a2)"/><text x="270" y="250" text-anchor="middle" font-size="9" fill="#2d6a4f">否：普通分支</text>
+  <rect x="25" y="352" width="330" height="125" rx="8" fill="#edf8f0" stroke="#2d6a4f" stroke-width="2"/><text x="190" y="378" text-anchor="middle" font-size="12" font-weight="700">Ordinary main-model path</text><text x="190" y="402" text-anchor="middle" font-size="9">完整 executable directory</text><text x="190" y="422" text-anchor="middle" font-size="9">scopeDecision = undefined</text><text x="190" y="442" text-anchor="middle" font-size="9">decisionOwner = main_model</text><text x="190" y="462" text-anchor="middle" font-size="9">可按安全策略 batch / parallel</text>
+  <path d="M650 260 L810 260 L810 350" fill="none" stroke="#7b2cbf" stroke-width="2" marker-end="url(#a2)"/><text x="730" y="250" text-anchor="middle" font-size="9" fill="#7b2cbf">是：DAG 分支</text>
+  <rect x="645" y="352" width="330" height="125" rx="8" fill="#f3e8ff" stroke="#7b2cbf" stroke-width="2"/><text x="810" y="378" text-anchor="middle" font-size="12" font-weight="700">Persistent DAG resolution</text><text x="810" y="402" text-anchor="middle" font-size="9">planRuntimeAgentStep(initial)</text><text x="810" y="422" text-anchor="middle" font-size="9">resolver → engine/store → current node</text><text x="810" y="442" text-anchor="middle" font-size="9">scopedDirectory / override / requireToolCall</text><text x="810" y="462" text-anchor="middle" font-size="9">decisionOwner = persistent_dag；单 Capability</text>
+  <path d="M190 477 L190 520 L430 520" fill="none" stroke="#2d6a4f" stroke-width="2" marker-end="url(#a2)"/><path d="M810 477 L810 520 L570 520" fill="none" stroke="#7b2cbf" stroke-width="2" marker-end="url(#a2)"/>
+  <rect x="375" y="500" width="250" height="62" rx="8" fill="#e3f2fd" stroke="#1d3557" stroke-width="2"/><text x="500" y="525" text-anchor="middle" font-size="12" font-weight="700">runBoundedNativeToolLoop()</text><text x="500" y="546" text-anchor="middle" font-size="9">共享模型调用、Tool/Skill schema 与结果处理</text>
+  <line x1="500" y1="562" x2="500" y2="596" stroke="#4361ee" stroke-width="2" marker-end="url(#a2)"/>
+  <rect x="365" y="598" width="270" height="62" rx="8" fill="#ffddd2" stroke="#e76f51" stroke-width="2"/><text x="500" y="623" text-anchor="middle" font-size="12" font-weight="700">Shared Capability Dispatch</text><text x="500" y="644" text-anchor="middle" font-size="9">permission / intent / dedupe / evidence</text>
+  <path d="M635 629 L820 629 L820 540 L627 540" fill="none" stroke="#7b2cbf" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#a2)"/><text x="812" y="615" text-anchor="end" font-size="9" fill="#7b2cbf">DAG evidence → re-scope；普通分支由主模型继续</text>
 </svg>
 </div>
 
-<h3>4.2 普通模式</h3>
+<h3>4.2 单次 Agent Invocation：Capability 注入与主模型循环</h3>
+<p>本节是单次 Agent Invocation 的权威执行链。重点不是笼统地说“把 Tool/Skill 给模型”，而是区分 Runtime 内部目录、Prompt instructions、Transcript evidence 与 Provider native schema：四者不是同一份数据，也不在同一时点产生。</p>
+<div class="diagram">
+<svg viewBox="0 0 1000 1080" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="a3" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#4361ee"/></marker></defs>
+  <rect x="300" y="18" width="400" height="58" rx="8" fill="#d8f3dc" stroke="#2d6a4f" stroke-width="2"/><text x="500" y="42" text-anchor="middle" font-size="12" font-weight="700">RuntimeRun + pinned Agent Bundle</text><text x="500" y="61" text-anchor="middle" font-size="9">model / prompts / tools / skills / runtimePolicy / configRevision</text>
+  <line x1="500" y1="76" x2="500" y2="104" stroke="#4361ee" stroke-width="2" marker-end="url(#a3)"/>
+  <rect x="285" y="106" width="430" height="72" rx="8" fill="#edf8f0" stroke="#2d6a4f"/><text x="500" y="131" text-anchor="middle" font-size="12" font-weight="700">Build Effective Capability Snapshot + Directory</text><text x="500" y="151" text-anchor="middle" font-size="9">Registry definition + exposure + dynamic MCP tools + permission</text><text x="500" y="168" text-anchor="middle" font-size="9">内部字段：roles / dispatch target / required inputs / promptOnly / executionToolName</text>
+  <line x1="500" y1="178" x2="500" y2="216" stroke="#4361ee" stroke-width="2" marker-end="url(#a3)"/>
+  <rect x="285" y="218" width="430" height="120" rx="8" fill="#fff3cd" stroke="#f59f00" stroke-width="2"/><text x="500" y="244" text-anchor="middle" font-size="12" font-weight="700">Receive execution scope from Orchestrator</text><text x="500" y="267" text-anchor="middle" font-size="9">普通分支：完整 executable directory + main_model owner</text><text x="500" y="288" text-anchor="middle" font-size="9">DAG 分支：当前 node scopedDirectory + persistent_dag owner</text><text x="500" y="309" text-anchor="middle" font-size="9">本循环消费既定 scope，不在这里判断 DAG applicability</text><text x="500" y="328" text-anchor="middle" font-size="9">scope 约束本轮可见 Capability、toolChoice、parallel 与 maxSteps</text>
+  <line x1="500" y1="338" x2="500" y2="405" stroke="#4361ee" stroke-width="2" marker-end="url(#a3)"/>
+  <rect x="410" y="407" width="180" height="42" rx="8" fill="#e3f2fd" stroke="#1d3557"/><text x="500" y="432" text-anchor="middle" font-size="11" font-weight="700">当前 iterationDirectory</text>
+  <line x1="500" y1="449" x2="500" y2="480" stroke="#4361ee" stroke-width="2" marker-end="url(#a3)"/>
+
+  <rect x="25" y="482" width="300" height="138" rx="8" fill="#f3e8ff" stroke="#7b2cbf"/><text x="175" y="507" text-anchor="middle" font-size="11" font-weight="700">① Prompt channel</text><text x="175" y="529" text-anchor="middle" font-size="9">systemPrompt + developerPrompt</text><text x="175" y="548" text-anchor="middle" font-size="9">instructionBlocks</text><text x="175" y="567" text-anchor="middle" font-size="9">当前 scope 内 prompt-bearing Skill instructions</text><text x="175" y="586" text-anchor="middle" font-size="9">prompt-only Skill 只走此通道</text><text x="175" y="605" text-anchor="middle" font-size="9">buildToolLoopPayloadWithContext()</text>
+  <rect x="350" y="482" width="300" height="138" rx="8" fill="#edf8f0" stroke="#2d6a4f"/><text x="500" y="507" text-anchor="middle" font-size="11" font-weight="700">② Evidence / context channel</text><text x="500" y="529" text-anchor="middle" font-size="9">current user + bounded Transcript</text><text x="500" y="548" text-anchor="middle" font-size="9">canonical attempt / rollback / tool replay 清洗</text><text x="500" y="567" text-anchor="middle" font-size="9">按 enabledTranscriptCapabilities 过滤</text><text x="500" y="586" text-anchor="middle" font-size="9">prior verified evidence + 本轮 step results</text><text x="500" y="605" text-anchor="middle" font-size="9">受 ContextAssembler Token Budget 约束</text>
+  <rect x="675" y="482" width="300" height="138" rx="8" fill="#e3f2fd" stroke="#1d3557"/><text x="825" y="507" text-anchor="middle" font-size="11" font-weight="700">③ Native capability channel</text><text x="825" y="529" text-anchor="middle" font-size="9">每个 model step 重新解析 iterationDirectory</text><text x="825" y="548" text-anchor="middle" font-size="9">Tool + native-callable Skill</text><text x="825" y="567" text-anchor="middle" font-size="9">kind / name / description / parameters</text><text x="825" y="586" text-anchor="middle" font-size="9">toolChoice + parallelToolCalls</text><text x="825" y="605" text-anchor="middle" font-size="9">buildNativeToolCallPayload()</text>
+  <path d="M175 620 L175 650 L440 650" fill="none" stroke="#4361ee" stroke-width="1.5" marker-end="url(#a3)"/><line x1="500" y1="620" x2="500" y2="648" stroke="#4361ee" stroke-width="1.5" marker-end="url(#a3)"/><path d="M825 620 L825 650 L560 650" fill="none" stroke="#4361ee" stroke-width="1.5" marker-end="url(#a3)"/>
+  <rect x="390" y="650" width="220" height="52" rx="8" fill="#d8f3dc" stroke="#2d6a4f" stroke-width="2"/><text x="500" y="672" text-anchor="middle" font-size="12" font-weight="700">Provider model step</text><text x="500" y="690" text-anchor="middle" font-size="9">messages + nativeToolCall contract</text>
+  <line x1="500" y1="702" x2="500" y2="730" stroke="#4361ee" stroke-width="2" marker-end="url(#a3)"/>
+  <polygon points="500,733 625,772 500,811 375,772" fill="#fff3cd" stroke="#f59f00" stroke-width="2"/><text x="500" y="768" text-anchor="middle" font-size="11" font-weight="700">返回 native tool_calls?</text><text x="500" y="786" text-anchor="middle" font-size="9">0、1 或普通模式下的安全 batch</text>
+
+  <path d="M375 772 L205 772 L205 837" fill="none" stroke="#2d6a4f" stroke-width="2" marker-end="url(#a3)"/><text x="290" y="762" text-anchor="middle" font-size="9" fill="#2d6a4f">否</text>
+  <rect x="25" y="839" width="360" height="116" rx="8" fill="#edf8f0" stroke="#2d6a4f"/><text x="205" y="864" text-anchor="middle" font-size="11" font-weight="700">Zero-tool / final decision</text><text x="205" y="886" text-anchor="middle" font-size="9">optional response / post-tool synthesis</text><text x="205" y="905" text-anchor="middle" font-size="9">zero-tool semantic recovery</text><text x="205" y="924" text-anchor="middle" font-size="9">requireToolCall bounded retry</text><text x="205" y="943" text-anchor="middle" font-size="9">失败或预算耗尽 → fail-closed final</text>
+  <path d="M625 772 L795 772 L795 837" fill="none" stroke="#e76f51" stroke-width="2" marker-end="url(#a3)"/><text x="710" y="762" text-anchor="middle" font-size="9" fill="#e76f51">是</text>
+  <rect x="615" y="839" width="360" height="116" rx="8" fill="#ffddd2" stroke="#e76f51"/><text x="795" y="864" text-anchor="middle" font-size="11" font-weight="700">Normalize + shared Dispatch</text><text x="795" y="886" text-anchor="middle" font-size="9">schema / scope / argument normalization</text><text x="795" y="905" text-anchor="middle" font-size="9">permission / current-turn write intent / dedupe</text><text x="795" y="924" text-anchor="middle" font-size="9">可选 execution-owner fence → Provider execute</text><text x="795" y="943" text-anchor="middle" font-size="9">持久化 tool.call / tool.result / tool.error</text>
+  <path d="M795 955 L795 988 L590 988" fill="none" stroke="#4361ee" stroke-width="2" marker-end="url(#a3)"/><path d="M205 955 L205 988 L410 988" fill="none" stroke="#4361ee" stroke-width="2" marker-end="url(#a3)"/>
+  <polygon points="500,968 610,1005 500,1042 390,1005" fill="#fff3cd" stroke="#f59f00"/><text x="500" y="1001" text-anchor="middle" font-size="11" font-weight="700">继续且仍有预算?</text><text x="500" y="1019" text-anchor="middle" font-size="9">由输入分支的 continuation owner 决定继续或 re-scope</text>
+  <path d="M390 1005 L15 1005 L15 551 L23 551" fill="none" stroke="#2d6a4f" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#a3)"/><text x="185" y="995" text-anchor="middle" font-size="9" fill="#2d6a4f">是：带真实结果进入下一 model step</text>
+  <path d="M610 1005 L810 1005 L810 1052" fill="none" stroke="#4361ee" stroke-width="2" marker-end="url(#a3)"/><text x="710" y="995" text-anchor="middle" font-size="9">否</text>
+  <rect x="675" y="1035" width="270" height="40" rx="8" fill="#e3f2fd" stroke="#1d3557"/><text x="810" y="1059" text-anchor="middle" font-size="11" font-weight="700">Finalize + transforms + events</text>
+</svg>
+</div>
+<h4>Capability 信息在什么时候给模型</h4>
+<table>
+<tr><th>信息</th><th>注入时点</th><th>模型实际收到的形式</th></tr>
+<tr><td>Agent system/developer/instruction blocks</td><td>首轮及需要重建 Tool Loop payload 时</td><td><code>system</code> messages；去重并记录 prompt assembly diagnostics</td></tr>
+<tr><td>Prompt-bearing Skill instructions</td><td>scope 确定后、Provider 调用前</td><td><code>system</code> messages；只装配当前允许的 Skill。prompt-only Skill 只走此通道</td></tr>
+<tr><td>Native Tool</td><td>每个 model step 开始时</td><td><code>nativeToolCall.tools[]</code> 中的 <code>kind/name/description/parameters</code></td></tr>
+<tr><td>Native-callable Skill</td><td>每个 model step 开始时</td><td>同样进入 <code>nativeToolCall.tools[]</code>，但 <code>kind="skill"</code>；若它也有 prompt role，还会同时进入 Prompt 通道</td></tr>
+<tr><td>Dispatch Skill alias</td><td>Directory 构建并解析 native capability 时</td><td>以公开 alias 暴露给模型，执行时通过 <code>executionToolName</code> 映射到目标 Tool</td></tr>
+<tr><td>历史 Capability evidence</td><td>Tool Loop payload/context 重建时</td><td>经过 canonical-attempt、rollback、scope 与 capability 过滤的 Transcript messages</td></tr>
+<tr><td>当前轮 Tool/Skill result</td><td>真实执行并持久化之后</td><td>作为下一轮 messages/evidence；没有完成结果就不能声称已执行</td></tr>
+<tr><td>Output-protocol Skill</td><td>post-tool response / output-structure 阶段</td><td>阶段化 Skill prompt 和/或 output transform，不等同于可调用 Tool</td></tr>
+</table>
 <ul>
-<li>普通模式不调用 Planner。Gateway 将完整有效 Capability surface 暴露给主模型，决策所有者是 <code>main_model</code>。</li>
-<li>同一 model step 可以返回一批调用。只有 <code>allowParallelTools=true</code>、全部为 Tool、全部 readonly 且每个 Tool 声明支持并行时才并行；其他批次顺序执行。</li>
-<li>无 tool calls 不必然立即结束：可接受文本、执行零工具语义恢复、做一次 required-tool retry，或进入 post-tool finalization。</li>
-<li>Provider retry/failover 只允许在流提交前按既有策略进行；Tool retry 是第五章独立规则。</li>
+<li><strong>Directory 是 Runtime 内部控制结构，不会原样交给模型。</strong>它先经过 scope，再分别投影为 Prompt、Evidence 和 native schema。</li>
+<li>Skill 的角色是正交的：同一个 Skill 可以既提供 Prompt instruction，又作为 native capability 被调用；不能只按“prompt-only / callable”二选一理解。</li>
+<li>普通分支由主模型决定下一步；Persistent DAG 分支由 DAG evidence/re-scope 决定下一 node。两者只复用本节的模型调用、Capability 投影和 Dispatch 执行能力。</li>
+<li>Provider retry/failover 只允许在流提交前按 Provider 规则进行；Tool retry 是第五章的独立规则。</li>
 </ul>
 
-<h3>4.3 Persistent DAG 模式 <span class="tag conditional">条件启用</span></h3>
+<h3>4.3 Persistent DAG 分支：独立状态机，复用 Capability 执行</h3>
+<p>Persistent DAG 不是由模型动态生成的业务 Execution Plan。它来自 pinned Agent Bundle 中预先发布并校验的 DAG definition；Orchestrator 仅在 <code>planner.mode="dag"</code> 且 root entry condition 匹配当前 requestText 时进入该分支。此时 RuntimeAgentPlanner/DAG resolver 不是自由规划完整 Tool Loop，而是结合固定 definition 与当前持久化 state，解析本轮应推进的 node 及其 Capability scope。</p>
+<div class="diagram">
+<svg viewBox="0 0 1000 790" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="a4" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#7b2cbf"/></marker></defs>
+  <rect x="275" y="18" width="450" height="58" rx="8" fill="#f3e8ff" stroke="#7b2cbf" stroke-width="2"/><text x="500" y="42" text-anchor="middle" font-size="12" font-weight="700">Orchestrator activates Persistent DAG branch</text><text x="500" y="61" text-anchor="middle" font-size="9">pinned mode=dag + root condition match + Registry + durable Transcript + no parallel tools</text>
+  <line x1="500" y1="76" x2="500" y2="106" stroke="#7b2cbf" stroke-width="2" marker-end="url(#a4)"/>
+  <rect x="300" y="108" width="400" height="72" rx="8" fill="#f7efff" stroke="#7b2cbf"/><text x="500" y="132" text-anchor="middle" font-size="12" font-weight="700">planRuntimeAgentStep(initial)</text><text x="500" y="152" text-anchor="middle" font-size="9">RuntimePlannerDagToolScopeResolver → Engine → Plan Store</text><text x="500" y="169" text-anchor="middle" font-size="9">获取/创建 plan，claim active node，输出 scopedDirectory / override</text>
+  <line x1="500" y1="180" x2="500" y2="210" stroke="#7b2cbf" stroke-width="2" marker-end="url(#a4)"/>
+  <polygon points="500,213 625,252 500,291 375,252" fill="#fff3cd" stroke="#f59f00" stroke-width="2"/><text x="500" y="248" text-anchor="middle" font-size="11" font-weight="700">scope 有 executable Capability?</text><text x="500" y="266" text-anchor="middle" font-size="9">promptOnly 不计入 executable scope</text>
+
+  <path d="M375 252 L195 252 L195 325" fill="none" stroke="#e76f51" stroke-width="2" marker-end="url(#a4)"/><text x="285" y="242" text-anchor="middle" font-size="10" fill="#e76f51">否</text>
+  <rect x="25" y="327" width="340" height="150" rx="8" fill="#fff1f2" stroke="#e76f51"/><text x="195" y="351" text-anchor="middle" font-size="11" font-weight="700">No executable scope</text><text x="195" y="374" text-anchor="middle" font-size="9">prompt-only Skills → Provider-only response</text><text x="195" y="394" text-anchor="middle" font-size="9">lightweightPrompt → suppressed/overridden prompt response</text><text x="195" y="414" text-anchor="middle" font-size="9">missing inputs → deterministic clarification</text><text x="195" y="434" text-anchor="middle" font-size="9">non-executing/fail-closed → guarded no-execution response</text><text x="195" y="454" text-anchor="middle" font-size="9">没有适用处理 → handled:false</text>
+
+  <path d="M625 252 L805 252 L805 325" fill="none" stroke="#7b2cbf" stroke-width="2" marker-end="url(#a4)"/><text x="715" y="242" text-anchor="middle" font-size="10" fill="#7b2cbf">是</text>
+  <rect x="635" y="327" width="340" height="150" rx="8" fill="#f3e8ff" stroke="#7b2cbf"/><text x="805" y="351" text-anchor="middle" font-size="11" font-weight="700">Scoped bounded Tool Loop</text><text x="805" y="374" text-anchor="middle" font-size="9">模型只看到 scopedDirectory；按 scope 决定 tool choice</text><text x="805" y="394" text-anchor="middle" font-size="9">要求单 Capability；多调用/越界调用 fail closed</text><text x="805" y="414" text-anchor="middle" font-size="9">dispatch 携带 plannerNodeId + node dedupeScope</text><text x="805" y="434" text-anchor="middle" font-size="9">planner fence admission + 共享 Dispatch 安全门控</text><text x="805" y="454" text-anchor="middle" font-size="9">result/error 形成 node evidence</text>
+
+  <line x1="805" y1="477" x2="805" y2="510" stroke="#7b2cbf" stroke-width="2" marker-end="url(#a4)"/>
+  <rect x="635" y="512" width="340" height="90" rx="8" fill="#e3f2fd" stroke="#7b2cbf"/><text x="805" y="536" text-anchor="middle" font-size="11" font-weight="700">Durable evidence → state transition</text><text x="805" y="558" text-anchor="middle" font-size="9">先持久化 tool.result/error；replan 时 Engine 消费未观察 evidence</text><text x="805" y="578" text-anchor="middle" font-size="9">CAS 完成 active node，计算 dependency/condition，调度下一 ready node</text>
+  <line x1="805" y1="602" x2="805" y2="632" stroke="#7b2cbf" stroke-width="2" marker-end="url(#a4)"/>
+  <polygon points="805,635 915,670 805,705 695,670" fill="#fff3cd" stroke="#f59f00"/><text x="805" y="666" text-anchor="middle" font-size="11" font-weight="700">Plan terminal?</text><text x="805" y="683" text-anchor="middle" font-size="9">或 transition/replan 被拒绝</text>
+  <path d="M695 670 L500 670 L500 740" fill="none" stroke="#4361ee" stroke-width="2" marker-end="url(#a4)"/><text x="600" y="660" text-anchor="middle" font-size="9">是 / fail-closed</text>
+  <rect x="365" y="742" width="270" height="42" rx="8" fill="#e3f2fd" stroke="#1d3557"/><text x="500" y="768" text-anchor="middle" font-size="11" font-weight="700">Finalize / clarification / failure</text>
+  <path d="M915 670 L985 670 L985 143 L702 143" fill="none" stroke="#7b2cbf" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#a4)"/><text x="970" y="620" text-anchor="end" font-size="9" fill="#7b2cbf">否：planRuntimeAgentStep(replan)</text>
+  <path d="M195 477 L195 763 L363 763" fill="none" stroke="#4361ee" stroke-width="2" marker-end="url(#a4)"/>
+</svg>
+</div>
+<table>
+<tr><th>DAG 自己拥有</th><th>复用 Runtime 能力</th></tr>
+<tr><td>发布时固定的 definition/version/hash 与 request hash</td><td>RuntimeRun、pinned Agent Bundle 与 active-attempt 校验</td></tr>
+<tr><td><code>RuntimePlannerDagPlanRecord</code>、node states、transitionCount、revision</td><td>4.2 的 Prompt/Evidence/native capability 投影</td></tr>
+<tr><td>root/edge condition、dependsOn、argument value source、optional node</td><td><code>runBoundedNativeToolLoop()</code> 的模型调用和 Tool result 处理</td></tr>
+<tr><td>execution claim、单 dispatch admission、node dedupe scope</td><td>第五章的 schema、permission、write-intent、budget 与 Provider dispatch</td></tr>
+<tr><td>completed/blocked、transition limit、indeterminate outcome recovery</td><td>Transcript tool.call/result/error 作为 durable evidence</td></tr>
+</table>
 <ul>
-<li>仅当发布的 <code>runtime.planner.mode="dag"</code> 且 DAG definition 适用于本轮 requestText 时启用。</li>
+<li>仅当 pinned <code>bundle.planner.mode="dag"</code> 且 definition 的参与 root 匹配本轮 requestText 时启用；不是模型先规划后动态选择 DAG。</li>
 <li>要求 Runtime Capability Registry、durable Transcript 和 authoritative Persistent DAG resolver；缺失时 fail closed。</li>
-<li>Planner 持久化 <code>RuntimePlannerDagPlanRecord</code>，steps 内嵌在单表 state JSONB；不是 ExecutionRun/Plan/Step 三表模型。</li>
-<li>Planner 输出当前 node 的 scope、override、requireToolCall 和边界；Tool result 作为 evidence 推进 transition/replan。</li>
-<li>DAG 要求单 Capability 执行，不允许 parallel tools；Planner admission/dispatch fence 不是用户写授权。</li>
+<li>Engine 持久化 <code>RuntimePlannerDagPlanRecord</code>，node states 内嵌在单表 state JSONB；它不是动态业务 Execution Plan。</li>
+<li>Active resolution 一次只允许一个 node Capability，并可提供参数 override、<code>requireToolCall</code> 和 <code>maxTransitions</code>。具体如何给模型见 4.2。</li>
+<li>Tool/Skill 调用成功或失败先写入 Transcript；下一次 <code>planRuntimeAgentStep(replan)</code> 读取同 Run、同 <code>plannerNodeId</code> 的 evidence 后，以 CAS 完成 node 并选择后继。</li>
+<li>DAG 禁止 parallel tools。node claim/admission 只解决并发一致性与单次 dispatch，不是用户写授权。</li>
+<li>Instance lease/session 丢失时，Recovery Coordinator 等待 run deadline、grace 和 claim expiry；没有已接纳调用或已有终态 evidence 时可重排，已接纳但没有 durable terminal evidence 时标记 indeterminate 并中断，禁止盲目重放非只读调用。</li>
 </ul>
 
-<h3>4.4 两条路径共享什么</h3>
-<p>两条路径都进入 <code>runBoundedNativeToolLoop()</code> 和第五章的单次 Tool Dispatch。Planner 只能收窄或强制当前 scope，不能绕过 schema、authoritative permission、write-intent、预算、Transcript、去重和错误分类。</p>
+<h3>4.4 共享出口、停止条件与不变量</h3>
+<table>
+<tr><th>结果</th><th>含义</th><th>后续</th></tr>
+<tr><td><code>handled:false</code></td><td>Orchestrator 不接管：未启用、无普通 Capability、隐式 native-tool 不支持，或 Persistent DAG 分支没有适用处理</td><td>RuntimeRunProxy 继续普通 Provider-only 路径</td></tr>
+<tr><td><code>handled:true</code> + result</td><td>clarification、lightweight response、Tool result final、主模型 synthesis 或正常文本结果</td><td><code>applyOutputTransformsForRun()</code>，发布 assistant.final/run.completed</td></tr>
+<tr><td>继续下一 model step</td><td>Tool result 已写回 messages，策略允许继续且未超过 maxSteps/no-progress/protocol 约束</td><td>普通分支由主模型继续；Persistent DAG 分支先由 resolver/engine 根据 durable evidence 解析当前或下一 node scope</td></tr>
+<tr><td>replan</td><td>DAG node evidence 已持久化且 plan 未终止</td><td><code>planRuntimeAgentStep(replan)</code>；空/越界 scope fail closed</td></tr>
+<tr><td>异常</td><td>manifest、owner、scope、Transcript、dispatch 或 Provider 保护失败</td><td>抛给 RuntimeRunProxy/Instance，最终由 Run completion 记录失败</td></tr>
+</table>
+<div class="boundary"><strong>始终成立的不变量：</strong>Persistent DAG resolver/engine 只决定 node 状态与 Capability scope，不授予用户写权限；主模型只能在有效 surface 内产生调用；第五章的共享 Dispatch 永远重新校验 schema、authoritative permission、当前轮 write-intent、budget、dedupe、Transcript 和错误状态。</div>
 
 <h2>五、Capability 与单次 Tool Dispatch</h2>
 
