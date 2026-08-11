@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FalconCore Runtime Architecture</title>
+<style>
+:root {
+  --bg:#fff; --card:#f8f9fa; --text:#1a1a2e; --muted:#495057; --border:#dee2e6;
+  --accent:#4361ee; --blue:#1d3557; --blue-bg:#e3f2fd; --green:#2d6a4f; --green-bg:#d8f3dc;
+  --purple:#7b2cbf; --purple-bg:#f3e8ff; --orange:#e76f51; --orange-bg:#ffddd2;
+  --red:#c1121f; --red-bg:#ffcdd2; --yellow:#856404; --yellow-bg:#fff3cd;
+}
+* { box-sizing:border-box; }
+body { max-width:1200px; margin:0 auto; padding:40px; color:var(--text); background:var(--bg); font:16px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; }
+h1 { margin:0 0 8px; color:var(--accent); font-size:2rem; }
+h2 { margin:52px 0 18px; padding-bottom:8px; border-bottom:2px solid var(--accent); font-size:1.5rem; }
+h3 { margin:32px 0 12px; color:var(--blue); font-size:1.2rem; }
+h4 { margin:22px 0 8px; color:var(--muted); }
+p { margin:10px 0; }
+ul,ol { margin:8px 0 8px 24px; }
+li { margin:4px 0; }
+code { padding:2px 6px; border-radius:4px; background:#e9ecef; font:0.88rem "SF Mono","Fira Code",monospace; }
+pre { overflow-x:auto; padding:16px 18px; border-radius:8px; color:#e2e2e2; background:#1a1a2e; font:0.85rem/1.55 "SF Mono","Fira Code",monospace; }
+table { width:100%; margin:16px 0; border:1px solid var(--border); border-spacing:0; border-radius:8px; overflow:hidden; font-size:0.9rem; }
+th { padding:10px 13px; color:#fff; background:var(--accent); text-align:left; }
+td { padding:10px 13px; border-bottom:1px solid var(--border); vertical-align:top; }
+tr:last-child td { border-bottom:0; }
+tr:nth-child(even) { background:var(--card); }
+.subtitle { margin-bottom:28px; color:var(--muted); }
+.note,.boundary,.summary,.example { margin:16px 0; padding:13px 16px; border-radius:8px; }
+.note { border:1px solid #ffc107; color:var(--yellow); background:var(--yellow-bg); }
+.boundary { border:1px solid var(--red); color:#7f1d1d; background:#fff1f2; }
+.summary { border:1px solid var(--green); color:#184e3a; background:var(--green-bg); }
+.example { border:1px solid #60a5fa; color:#1e3a5f; background:#eff6ff; }
+.diagram { overflow-x:auto; margin:22px 0; padding:18px; border:1px solid var(--border); border-radius:10px; background:#fff; text-align:center; }
+.step { margin:10px 0; padding:13px 16px; border-left:4px solid var(--accent); border-radius:0 8px 8px 0; background:var(--card); }
+.tag { display:inline-block; padding:1px 7px; border-radius:10px; font-size:.78rem; font-weight:700; }
+.implemented { color:var(--green); background:var(--green-bg); }
+.conditional { color:var(--yellow); background:var(--yellow-bg); }
+.design { color:var(--red); background:var(--red-bg); }
+.small { color:var(--muted); font-size:.88rem; }
+</style>
+</head>
+<body>
+
+<h1>🦅 FalconCore Runtime Architecture</h1>
+<p class="subtitle">从逻辑 Session 的多轮连续性，到单次 Agent Invocation 的完整执行说明<br>版本 v3.8｜2026-08-11｜以当前 <code>src/vnext/</code> 实现为准</p>
+
+<div class="summary"><strong>两个核心视角：</strong>逻辑 Session 是跨多轮的对话范围，每轮输入创建一个独立 RuntimeRun，并可跨不同 AgentInstance registration session 重建历史；Agent Invocation 是单个 text Run 内的智能执行过程，由 RuntimeGateway 基于 pinned RuntimeBundle 装配上下文和 Capability surface，再执行 Direct Provider Invocation、普通 Capability Harness 或条件命中的 Persistent DAG scope。</div>
+
+<div class="note"><strong>文档口径：</strong><span class="tag implemented">已实现</span> 表示当前代码路径；<span class="tag conditional">条件启用</span> 表示只有发布配置和本轮输入命中时生效；<span class="tag design">设计中</span> 表示不得按已上线能力理解。</div>
+
+<div class="example"><strong>按目的阅读：</strong>理解服务和对象边界看第一章；新增与部署 Agent 看第二章；理解一个 Session 如何跨多轮运作看第三章；理解一个 Agent 在单轮内如何执行看第四章；核查 Capability 安全执行看第五章；Provider 看第六章；并发恢复看第七章；排障和代码入口看第八章；实现边界与平台扩展示例看第九章。</div>
+
+<h2>一、系统边界、核心对象与权威来源</h2>
+
+<h3>1.1 三个平面与四个服务</h3>
+<p>FalconCore 将“定义 Agent”“承接 Run”和“执行智能循环”分开：ControlPlane 发布不可变配置；外部平台启动通用 AgentInstance；RuntimeGateway 持有运行事实、模型循环和 Capability 执行；ChannelIngress 是可选的渠道入口。</p>
+<table>
+<tr><th>服务</th><th>负责</th><th>不负责</th><th>入口 / 标准 Compose 端口</th></tr>
+<tr><td><strong>ControlPlane</strong></td><td>Agent 配置、发布、Deployment、Provider/Secret 管理、Admin API；CLI 组合中可启用 Chat Facade</td><td>不执行模型循环，不管理 worker Pod 生命周期</td><td><code>startControlPlaneServer()</code><br>4010</td></tr>
+<tr><td><strong>RuntimeGateway</strong></td><td>Run ledger、调度、RuntimeBundle、Session Context、Capability Harness、DAG Tool Scope Resolver、Capability Dispatch、Provider、Transcript</td><td>不作为外部 worker，不直接创建 K8s/Docker 实例</td><td><code>startRuntimeGatewayServer()</code><br>API 4011；SSE 4012</td></tr>
+<tr><td><strong>AgentInstance</strong></td><td>注册/心跳、lease/capacity、拉取与认领 Run、取消监控、调用 Gateway 顶层接口、提交终态</td><td>不持有 RuntimeBundle 内容、Provider credential、PG/Redis 连接；不在本地实现 Agent Loop</td><td><code>startAgentInstanceServer()</code><br>health 4020</td></tr>
+<tr><td><strong>ChannelIngress</strong></td><td>Telegram 等通道入口、消息去重、delivery queue、路由到 RuntimeGateway</td><td>不执行 Agent</td><td><code>startChannelIngressServer()</code><br>4013</td></tr>
+</table>
+
+<div class="diagram">
+<svg viewBox="0 0 1000 650" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="a1" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#4361ee"/></marker>
+    <marker id="a1g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#2d6a4f"/></marker>
+    <marker id="a1o" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#e76f51"/></marker>
+    <marker id="a1y" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#f59f00"/></marker>
+    <marker id="a1x" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#adb5bd"/></marker>
+  </defs>
+  <rect x="12" y="10" width="976" height="170" rx="10" fill="#faf5ff" stroke="#d8b4fe"/><text x="28" y="34" font-size="11" font-weight="700" fill="#7b2cbf">CONTROL PLANE：定义并发布 Agent，不执行 Agent Loop</text>
+  <rect x="30" y="65" width="120" height="54" rx="8" fill="#f3e8ff" stroke="#7b2cbf"/><text x="90" y="97" text-anchor="middle" font-size="11">Admin UI</text>
+  <rect x="200" y="52" width="180" height="80" rx="8" fill="#f3e8ff" stroke="#7b2cbf" stroke-width="2"/><text x="290" y="79" text-anchor="middle" font-size="12" font-weight="700">ControlPlane</text><text x="290" y="99" text-anchor="middle" font-size="9">Draft / Publish / Provider</text><text x="290" y="116" text-anchor="middle" font-size="9">Deployment / Manifest</text>
+  <rect x="430" y="52" width="160" height="80" rx="8" fill="#e9ecef" stroke="#adb5bd"/><text x="510" y="80" text-anchor="middle" font-size="11" font-weight="700">PostgreSQL</text><text x="510" y="100" text-anchor="middle" font-size="9">Config revisions / Deployment</text><text x="510" y="117" text-anchor="middle" font-size="9">Provider binding / Secret</text>
+  <rect x="640" y="52" width="135" height="80" rx="8" fill="#fff3cd" stroke="#f59f00"/><text x="707" y="79" text-anchor="middle" font-size="11" font-weight="700">Manifest</text><text x="707" y="99" text-anchor="middle" font-size="9">Docker Compose</text><text x="707" y="116" text-anchor="middle" font-size="9">or Kubernetes YAML</text>
+  <rect x="825" y="52" width="140" height="80" rx="8" fill="#fff1f2" stroke="#e76f51"/><text x="895" y="79" text-anchor="middle" font-size="11" font-weight="700">External Platform</text><text x="895" y="99" text-anchor="middle" font-size="9">Docker / K8s</text><text x="895" y="116" text-anchor="middle" font-size="9">starts AgentInstance</text>
+  <line x1="150" y1="92" x2="198" y2="92" stroke="#4361ee" stroke-width="2" marker-end="url(#a1)"/><text x="174" y="82" text-anchor="middle" font-size="8">① configure</text>
+  <line x1="380" y1="92" x2="428" y2="92" stroke="#4361ee" stroke-width="2" marker-end="url(#a1)"/><text x="404" y="82" text-anchor="middle" font-size="8">② persist</text>
+  <line x1="590" y1="92" x2="638" y2="92" stroke="#4361ee" stroke-width="2" marker-end="url(#a1)"/><text x="614" y="82" text-anchor="middle" font-size="8">③ generate</text>
+  <line x1="775" y1="92" x2="823" y2="92" stroke="#4361ee" stroke-width="2" marker-end="url(#a1)"/><text x="799" y="82" text-anchor="middle" font-size="8">④ apply</text>
+  <line x1="895" y1="132" x2="895" y2="240" stroke="#e76f51" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#a1o)"/><text x="905" y="190" font-size="8" fill="#e76f51">starts workload</text>
+
+  <rect x="12" y="195" width="976" height="210" rx="10" fill="#f0fdf4" stroke="#86efac"/><text x="28" y="219" font-size="11" font-weight="700" fill="#2d6a4f">RUN PLANE：Instance 主动调用 Gateway；不直接连接数据库或 Provider</text>
+  <rect x="30" y="260" width="145" height="66" rx="8" fill="#e3f2fd" stroke="#4361ee"/><text x="102" y="286" text-anchor="middle" font-size="11" font-weight="700">Client / ChannelIngress</text><text x="102" y="307" text-anchor="middle" font-size="9">create Run</text>
+  <rect x="245" y="242" width="230" height="104" rx="8" fill="#d8f3dc" stroke="#2d6a4f" stroke-width="2"/><text x="360" y="269" text-anchor="middle" font-size="13" font-weight="700">RuntimeGateway</text><text x="360" y="290" text-anchor="middle" font-size="9">Run ledger / assignment / Session Context</text><text x="360" y="308" text-anchor="middle" font-size="9">Capability Harness / DAG Scope / Dispatch</text><text x="360" y="326" text-anchor="middle" font-size="9">Provider credential / Transcript</text>
+  <rect x="245" y="358" width="230" height="36" rx="8" fill="#e9ecef" stroke="#adb5bd"/><text x="360" y="380" text-anchor="middle" font-size="9">⑥ PG facts · Redis lease/capacity/events</text>
+  <rect x="785" y="242" width="180" height="104" rx="8" fill="#ffddd2" stroke="#e76f51" stroke-width="2"/><text x="875" y="268" text-anchor="middle" font-size="12" font-weight="700">AgentInstance</text><text x="875" y="289" text-anchor="middle" font-size="9">register / heartbeat / poll</text><text x="875" y="307" text-anchor="middle" font-size="9">claim / top-level invoke</text><text x="875" y="325" text-anchor="middle" font-size="9">complete / cancellation monitor</text>
+  <line x1="175" y1="293" x2="243" y2="293" stroke="#4361ee" stroke-width="2" marker-end="url(#a1)"/><text x="209" y="282" text-anchor="middle" font-size="8">⑤ POST /runs</text>
+  <line x1="360" y1="346" x2="360" y2="356" stroke="#adb5bd" stroke-width="2" marker-end="url(#a1x)"/>
+  <line x1="783" y1="278" x2="477" y2="278" stroke="#2d6a4f" stroke-width="2" marker-end="url(#a1g)"/><text x="630" y="266" text-anchor="middle" font-size="8">⑦ register / heartbeat / poll / claim</text>
+  <line x1="783" y1="322" x2="477" y2="322" stroke="#4361ee" stroke-width="2" marker-end="url(#a1)"/><text x="630" y="343" text-anchor="middle" font-size="8">⑧ context / model invoke or stream / complete</text>
+
+  <rect x="12" y="420" width="976" height="215" rx="10" fill="#eff6ff" stroke="#93c5fd"/><text x="28" y="444" font-size="11" font-weight="700" fill="#1d3557">GATEWAY EXECUTION：真正的 Agent 智能循环和外部能力调用</text>
+  <rect x="55" y="488" width="200" height="92" rx="8" fill="#d8f3dc" stroke="#2d6a4f"/><text x="155" y="514" text-anchor="middle" font-size="11" font-weight="700">Pinned RuntimeBundle</text><text x="155" y="534" text-anchor="middle" font-size="9">Prompt / Model / Tool / Skill</text><text x="155" y="552" text-anchor="middle" font-size="9">RuntimePolicy / MemoryPolicy / Planner</text><text x="155" y="570" text-anchor="middle" font-size="9">fixed configRevision</text>
+  <rect x="315" y="474" width="250" height="120" rx="8" fill="#e3f2fd" stroke="#1d3557" stroke-width="2"/><text x="440" y="501" text-anchor="middle" font-size="12" font-weight="700">Agent Invocation in Gateway</text><text x="440" y="522" text-anchor="middle" font-size="9">Context + Prompt assembly</text><text x="440" y="540" text-anchor="middle" font-size="9">Direct Provider Invocation / ordinary Capability Harness / DAG scope</text><text x="440" y="558" text-anchor="middle" font-size="9">model → optional tool calls → real results</text><text x="440" y="576" text-anchor="middle" font-size="9">continue / finalize</text>
+  <rect x="625" y="470" width="150" height="72" rx="8" fill="#dbeafe" stroke="#1d3557"/><text x="700" y="497" text-anchor="middle" font-size="11" font-weight="700">Model Provider</text><text x="700" y="518" text-anchor="middle" font-size="9">messages + native tools</text>
+  <rect x="625" y="556" width="150" height="62" rx="8" fill="#fff3cd" stroke="#f59f00"/><text x="700" y="581" text-anchor="middle" font-size="11" font-weight="700">Capability Registry</text><text x="700" y="601" text-anchor="middle" font-size="9">definition / schema / permission</text>
+  <rect x="825" y="500" width="140" height="92" rx="8" fill="#fff1f2" stroke="#e76f51"/><text x="895" y="526" text-anchor="middle" font-size="11" font-weight="700">Executors</text><text x="895" y="547" text-anchor="middle" font-size="9">Local / MCP</text><text x="895" y="565" text-anchor="middle" font-size="9">External Provider</text><text x="895" y="583" text-anchor="middle" font-size="9">Tool / Skill</text>
+  <line x1="255" y1="534" x2="313" y2="534" stroke="#4361ee" stroke-width="2" marker-end="url(#a1)"/><text x="284" y="523" text-anchor="middle" font-size="8">⑨ materialize</text>
+  <line x1="565" y1="506" x2="623" y2="506" stroke="#4361ee" stroke-width="2" marker-end="url(#a1)"/><text x="594" y="495" text-anchor="middle" font-size="8">⑩ model call</text>
+  <line x1="565" y1="571" x2="623" y2="585" stroke="#f59f00" stroke-width="2" marker-end="url(#a1y)"/><text x="590" y="600" text-anchor="middle" font-size="8">⑪ resolve</text>
+  <line x1="775" y1="585" x2="823" y2="558" stroke="#e76f51" stroke-width="2" marker-end="url(#a1o)"/><text x="800" y="594" text-anchor="middle" font-size="8">⑫ execute</text>
+</svg>
+</div>
+<div class="boundary"><strong>读图边界：</strong>External Platform 只负责启动 AgentInstance；AgentInstance 只承接租约、容量和 Run 生命周期并主动调用 Gateway；Prompt 装配、模型循环、Tool/Skill 解析与执行均由 RuntimeGateway 持有。AgentInstance 与 PostgreSQL、Redis、Model Provider、MCP/Local Executor 之间没有直接调用边。</div>
+
+<h3>1.2 核心运行对象与所有权</h3>
+<table>
+<tr><th>对象</th><th>含义</th><th>生命周期/所有者</th></tr>
+<tr><td><strong>AgentConfigSnapshot</strong></td><td>Prompt、Model、Tool/Skill exposure、runtime/memory/planner policy 的不可变 revision</td><td>ControlPlane 发布；Gateway 按 Run 固定 revision 读取</td></tr>
+<tr><td><strong>AgentDeployment</strong></td><td>把 agentId 固定到 configRevision，并声明 runtimeKind、capabilities、scaling 和启动模板</td><td>ControlPlane 保存 deployment intent；外部平台执行 manifest</td></tr>
+<tr><td><strong>Logical Chat Session</strong></td><td>由 <code>agentId + user + threadId</code> 派生的多轮对话范围；用于跨 Run 查找历史，不等于一个常驻进程或单行执行状态</td><td>身份来自 Run input/chat scope；历史事实来自 RuntimeRun + Transcript</td></tr>
+<tr><td><strong>HotSession</strong></td><td>逻辑 Session 到 preferred Instance 的短期粘性投影，用于容量命中、定向排队和重分配判断</td><td>Redis TTL 在线态；不是会话历史或 Run 终态的事实源</td></tr>
+<tr><td><strong>AgentInstance Registration Session</strong></td><td>通用 worker 每次注册产生的物理执行世代，包含 <code>sessionId</code>、token、generation、lease 和 capacity</td><td>外部进程 + Gateway Registry；Redis 在线态、PostgreSQL lifecycle checkpoint</td></tr>
+<tr><td><strong>RuntimeRun</strong></td><td>一次独立执行请求，固定 agent/deployment/configRevision、input、assignment、activeAttemptId 和终态；逻辑 session identity 位于 input，物理 owner 位于 <code>assignedSessionId</code></td><td>RuntimeGateway / SessionRunLedger</td></tr>
+<tr><td><strong>RunAttempt</strong></td><td>某次 assignment 对应的执行尝试；在 <code>assignRun()</code> 创建为 assigned，在 <code>claimRun()</code> 后切换为 running</td><td>SessionRunLedger / PostgreSQL；与 Instance session/generation 共同形成 owner fence</td></tr>
+<tr><td><strong>RuntimeBundle</strong></td><td>当前 Run 固定 revision 的运行时契约</td><td>Gateway 构造；不下发 credential、PG/Redis URL 或配置内容给 Instance</td></tr>
+<tr><td><strong>Transcript</strong></td><td>用户、助手、Tool Call/Result/Error 等持久化证据</td><td>PostgreSQL；用于上下文、审计、回放和恢复</td></tr>
+<tr><td><strong>ProviderBinding / Secret</strong></td><td>把 Agent model route 绑定到可用 Provider account 和 credential</td><td>ControlPlane 管理；Gateway 调用时解析，credential 不进入 RuntimeBundle</td></tr>
+<tr><td><strong>CapabilityDefinition / Executor</strong></td><td>Definition 定义模型可见 schema 与权威 permission；Executor/Provider 完成真实动作</td><td>Gateway Registry / Capability composition；AgentConfig 只选择或限制 exposure</td></tr>
+<tr><td><strong>RuntimeVisibleOutputPolicy</strong></td><td>在用户可见边界执行作用域内的事实复验、脱敏或安全 fallback</td><td>Gateway 全局注册并由 <code>appliesTo(run)</code> 自行限定作用域；不是 AgentConfig 字段</td></tr>
+</table>
+
+<div class="boundary"><strong>对象边界：</strong>Agent 是固定到 revision 的运行合同；AgentInstance 是承接 Run 的通用 worker；逻辑 Session 是跨 Run 的查询和连续性范围。一个逻辑 Session 可以经历多个 RuntimeRun、RunAttempt 和 AgentInstance registration session。</div>
+
+<h3>1.3 权威来源与全局不变量</h3>
+<table>
+<tr><th>要判断的问题</th><th>权威来源</th><th>不能替代它的内容</th></tr>
+<tr><td>Agent 使用哪套配置</td><td>Run 固定的 <code>agentId + revision</code> 及 RuntimeBundle</td><td>未发布 Draft、Instance 本地标记或模型自述</td></tr>
+<tr><td>模型本轮能看到哪些 Tool/Skill</td><td>Registry + availability + pinned/dynamic exposure + 当前普通/DAG scope</td><td>Prompt 中写出的工具名、Deployment capabilities</td></tr>
+<tr><td>Capability schema 与 permission</td><td>CapabilityDefinition；Agent exposure 只能进一步收紧</td><td>模型选择、DAG admission 或更高的配置声明</td></tr>
+<tr><td>是否允许真实 write/dangerous 调用</td><td>authoritative permission + 绑定本 Run/Tool/requesterText 的当前轮 write-intent；非执行权 display-only Tool 仅按严格 metadata 例外</td><td>历史授权、Prompt、Planner scope 或 DAG node admission</td></tr>
+<tr><td>外部动作是否执行</td><td>durable claim/fence 与 Transcript <code>tool.call/result/error</code></td><td>模型说“已完成”、展示计划或仅有 tool intent</td></tr>
+<tr><td>DAG 当前 node</td><td>固定 definition + DAG plan/node state + 同 node durable evidence</td><td><code>update_plan</code> 或模型自由规划</td></tr>
+<tr><td>最终可以展示什么</td><td>真实 evidence 上的 synthesis，再经过有效 output transform 和命中的 RuntimeVisibleOutputPolicy</td><td>Response Contract metadata、写权限或 DAG transition</td></tr>
+</table>
+<div class="note"><strong>全局不变量：</strong>Instance 不拥有 Agent 智能循环；逻辑 Session 不等于 Instance registration session；模型不能扩大 Capability scope；DAG scope/admission 不授予用户写权限；没有 durable terminal evidence 就不能宣称外部动作成功；终态与旧 Attempt 结果不能逆向推进 Run。</div>
+
+<h2>二、配置、部署与启动</h2>
+
+<h3>2.1 从通用模型到可运行 Agent：完整生命周期</h3>
+<p>FalconCore 不通过复制模型来创建 Agent。模型提供通用理解与生成能力；AgentConfig 把项目身份、工作规则、可访问能力和运行边界固定成版本；Deployment 再把该版本关联到可运行的通用 AgentInstance。</p>
+<pre>① 准备外部依赖
+   Provider Binding + 已实现并注册的 Tool/Skill
+        ↓
+② 创建 Agent Draft
+   Prompt + Model route + Capability exposure + Runtime limits
+        ↓ Publish
+③ AgentConfigSnapshot（不可变 revision）
+        ↓ 创建或同步
+④ AgentDeployment
+   agentId + configRevision + runtimeKind + image/resources/Gateway address
+        ↓ 由 Docker / Kubernetes / Local 外部启动
+⑤ AgentInstance（通用 worker）
+   register → heartbeat → revision Ready → claim Run
+        ↓
+⑥ RuntimeGateway 执行
+   读取 revision → 组装 Prompt/Capability → 调用模型 → Dispatch → Transcript</pre>
+
+<table>
+<tr><th>对象</th><th>回答的问题</th><th>不负责什么</th></tr>
+<tr><td><strong>AgentConfig</strong></td><td>这个 Agent 是谁、怎样判断、能看到哪些能力、执行怎样受限？</td><td>不安装 Tool、不开容器、不保存 Provider credential</td></tr>
+<tr><td><strong>AgentConfigSnapshot</strong></td><td>某个已发布 revision 的完整运行合同是什么？</td><td>发布后不可修改；新变更必须生成新 revision</td></tr>
+<tr><td><strong>AgentDeployment</strong></td><td>哪个 revision 以何种 runtime、资源和容量运行？</td><td>不包含 Prompt、Tool executor 或完整 RuntimeBundle</td></tr>
+<tr><td><strong>AgentInstance</strong></td><td>哪个通用 worker 在线、Ready，并可承接多少 Run？</td><td>不拥有项目 Prompt、模型调用或 Capability 实现；这些由 Gateway 按 revision 解析</td></tr>
+</table>
+<div class="boundary"><strong>核心边界：</strong>配置 Agent、实现 Capability 和启动计算资源是三个独立动作。AgentConfig 选择能力；Registry/Executor 提供能力；AgentDeployment 和 AgentInstance 提供运行容量。</div>
+
+<h3>2.2 Agent 专业化配置：每项配置何时生效</h3>
+<p>一个项目 Agent 的差异主要来自 Prompt、模型路由、Capability exposure 和响应要求。以下表格同时说明“配置有什么用”和“它不能替代什么”。</p>
+<table>
+<tr><th>配置</th><th>作用</th><th>运行时投影</th><th>边界</th></tr>
+<tr><td><code>agentId / name / description</code></td><td>标识 Agent 并说明责任范围</td><td><code>agentId</code> 关联 Draft、revision、Deployment、Run 和审计；名称与描述主要用于管理和发现</td><td>ID 应稳定；修改名称不会改变 Capability 权限</td></tr>
+<tr><td><code>systemPrompt</code></td><td>定义身份、目标、成功标准和长期边界</td><td>发布时必填；通常作为 system message 进入每次 Agent Invocation，受控轻量阶段可显式抑制或覆盖</td><td>不能授予数据库/API 权限，也不能证明动作已经执行</td></tr>
+<tr><td><code>developerPrompt</code></td><td>定义项目流程、判断规则、澄清和异常处理</td><td>基础 Provider 投影保留 developer role；Capability Harness Conversation Context 当前以 system message 装配</td><td>不要依赖所有执行路径都使用相同 Provider role</td></tr>
+<tr><td><code>instructionBlocks[]</code></td><td>将响应要求、合规规则或阶段说明模块化</td><td>仅装配 <code>enabled=true</code> 且内容非空的 block；重复内容会被抑制并记录 diagnostics</td><td><code>order</code> 是配置顺序元数据；不要把 block 当成权限或状态门控</td></tr>
+<tr><td><code>model</code></td><td>选择 Provider、模型、候选路由及生成参数</td><td>revision 固定路由合同；Gateway 调用时通过 Provider Binding 解析可用 account/credential</td><td>credential 保存在 SecretStore，不进入 AgentConfig 或 RuntimeBundle</td></tr>
+<tr><td><code>tools[]</code></td><td>声明该 Agent 可暴露的内建或显式固定 Tool</td><td>Run 时与 Registry definition、availability、authoritative permission 和当前 scope 求交集</td><td>只是 exposure，不会安装实现；配置 permission 不能高于 Registry 权威值</td></tr>
+<tr><td><code>skills[]</code></td><td>启用领域方法或可调用复合能力</td><td>按 Skill metadata 进入 Prompt channel、native Capability channel 或 output/post-tool transform</td><td>Prompt-only Skill 不等于 Tool；callable Skill 仍受 schema、scope 和预算约束</td></tr>
+<tr><td>Response Contract</td><td>约束最终回答的结构、语气和失败表达</td><td>Admin UI 将 instructions 写入 <code>instructionBlocks[id=response_contract]</code>，将 mode/name/schema 保存到 <code>metadata.responseContract</code></td><td>当前没有通用 JSON Schema 强制校验器；它不能替代 output transform、权限或真实证据</td></tr>
+<tr><td><code>metadata</code></td><td>保存管理信息和已有消费者约定的扩展键</td><td>只有被 Runtime 明确读取的键才影响执行</td><td>任意 metadata 不会自动进入 Prompt，也不会自动成为 policy gate</td></tr>
+</table>
+
+<div class="example"><strong>项目交付 Agent 示例：</strong>System Prompt 固定职责和事实边界；Developer Prompt 定义风险升级与验收方法；readonly Tool 查询工单和代码状态；write Tool 创建任务；Skill 注入 Review 清单；Response Contract 规定“摘要、证据、风险、下一步”。模型负责判断下一步，只有持久化 Tool result 能证明外部系统已被读取或修改。</div>
+
+<h3>2.3 平台运行配置：约束执行，不定义项目专业能力</h3>
+<p>下列字段也随 revision 发布，但属于 FalconCore 通用 Runtime 控制面。它们回答“执行怎样被限制、恢复和持久化”，不回答“Agent 具备什么业务知识”。</p>
+<table>
+<tr><th>配置</th><th>当前作用</th><th>使用原则</th></tr>
+<tr><td><code>runtime</code></td><td>投影 run/tool/skill/token、并行、retry 和 failure policy 等有界预算</td><td>按风险设置明确上限；不能用无限 retry 或宽泛并行掩盖失败</td></tr>
+<tr><td><code>memory</code></td><td>在对应 retriever/extractor 和权限存在时控制长期上下文的检索、写入和 TTL</td><td>Memory 是允许的长期上下文；Transcript 仍是本轮执行证据</td></tr>
+<tr><td><code>runtime.planner</code></td><td>可选配置固定 Persistent DAG；只有 <code>mode=dag</code> 且 definition 匹配 requestText 时才解析当前 node scope</td><td>不是动态生成完整 plan，也不是所有 Agent 的必配项</td></tr>
+<tr><td><code>capabilityBundles[]</code></td><td>启用代码识别的确定性组合能力；当前支持 <code>user-preference-memory</code></td><td>不是任意 bundle 插件系统；只能使用代码支持的 ID/version</td></tr>
+<tr><td><code>policies[]</code></td><td>可以 Draft、Publish 和持久化命名 policy</td><td>当前没有统一投影进 RuntimeBundle 的执行门控；没有明确 consumer 时应视为预留配置</td></tr>
+<tr><td>发布生成字段</td><td>Publish 生成 <code>revision</code>、时间信息，并按需生成 <code>runtimePlannerManifest</code></td><td>调用方引用生成结果，不手工伪造派生 manifest</td></tr>
+</table>
+
+<h3>2.4 Tool/Skill 的实现、注册、暴露与部署</h3>
+<p>在 Agent 页面勾选 Tool/Skill 只是在 revision 中声明 exposure。模型真正能够调用一项能力，还要求实现、Registry、availability 和当前 Run scope 同时成立。</p>
+<pre>A. 提供实现
+   内建代码 / Skill package / MCP Server
+        ↓
+B. 注册能力
+   Definition + description + schema + permission + Executor/Provider + availability
+        ↓
+C. 暴露给 Agent
+   AgentConfig exposure；MCP 还可按 server agent/role policy 动态追加
+        ↓
+D. 构建本轮 Effective Scope
+   revision exposure ∩ registered ∩ available ∩ role/policy ∩ 普通或 DAG node scope
+        ↓
+E. Shared Capability Dispatch
+   schema → authoritative permission → write-intent → dedupe → budget → Executor/Provider → Transcript</pre>
+
+<table>
+<tr><th>能力来源</th><th>实现与部署</th><th>如何对 Agent 生效</th></tr>
+<tr><td>内建 Tool</td><td>在 FalconCore 中提供 ToolDefinition、schema、Executor/Provider 和 availability；变更后重建并部署 RuntimeGateway</td><td>从 Capability 列表加入 Agent Draft 并 Publish；Run 时再次计算 effective scope</td></tr>
+<tr><td>MCP Tool</td><td>独立部署 MCP Server；Gateway 通过 <code>FALCONCORE_MCP_SERVERS_JSON</code> 的 stdio 或 streamable-http 配置发现和调用</td><td>可以在 AgentConfig 显式固定，也可能按 server agent allow/deny 与 subagent role policy 动态追加</td></tr>
+<tr><td>Prompt-only Skill</td><td>Skill package 提供 instructions/metadata，由 Gateway loader/materialization 读取</td><td>启用后只向当前允许 scope 的 Prompt channel 注入说明</td></tr>
+<tr><td>Callable Skill</td><td>除 instructions/native schema 外，还需注册 Skill executor 及其依赖</td><td>启用后可进入 Prompt 和 native Capability channel，执行仍经过共享 Dispatch</td></tr>
+</table>
+
+<h4>新增 Capability 的代码验收顺序</h4>
+<ol>
+<li><strong>实现：</strong>定义稳定输入、输出和失败语义；有外部副作用时明确幂等与 unknown outcome。</li>
+<li><strong>注册 Definition：</strong>提供唯一名称、描述、输入 schema、权威 permission 和 metadata。</li>
+<li><strong>注册 Executor/Provider：</strong>prompt-only Skill 除外；依赖缺失时 availability 必须为 false 或 fail closed。</li>
+<li><strong>暴露并发布：</strong>内建能力加入 Agent Draft；MCP 还可由 server policy 提供候选 exposure。</li>
+<li><strong>执行验证：</strong>检查 schema、permission、write-intent、budget、dedupe、真实 result/error 和 Transcript。</li>
+</ol>
+<p class="small">内建能力的集中入口包括 <code>default-capability-definitions.ts</code>、<code>default-capability-executors.ts</code> 和 <code>default-capability-availability.ts</code>；MCP Definition/Provider 由 Gateway 启动期 catalog/discovery 注册。</p>
+<div class="boundary"><strong>部署边界：</strong>AgentInstance 镜像只实现通用 worker 和 Run proxy 合同。Prompt、Provider credential、Capability Registry、Executor 和模型/工具 Dispatch 均由 RuntimeGateway 持有；Deployment 的 <code>capabilities</code> 是 worker 可承接的运行类别，不是 AgentConfig 的逐项 Tool/Skill exposure。</div>
+
+<h3>2.5 创建 Draft 并发布不可变 revision</h3>
+<ol>
+<li><strong>确认能力已就绪：</strong>通过 <code>GET /admin/capabilities</code> 检查所需 Tool/Skill 已 registered 且 available；AgentConfig 不能创建不存在的能力。</li>
+<li><strong>创建 Draft：</strong>在 <strong>Agents</strong> 中创建稳定 Agent ID，填写 Name、Description 和必需的 System Prompt。</li>
+<li><strong>完成专业化配置：</strong>填写 Developer Prompt、Instruction Block/Response Contract，选择最小 Tool/Skill 集合并设置有界 Runtime 参数。</li>
+<li><strong>连接模型：</strong>在 <strong>Providers</strong> 中创建或验证 Provider Binding，将 provider/model route 写回 Draft；credential 只保存在 SecretStore。</li>
+<li><strong>保存 Draft：</strong>Draft 可以继续编辑，保存成功不代表 Runtime 已采用该配置。</li>
+<li><strong>Publish：</strong>ControlPlane 校验字段、Capability/permission、Provider Binding、Runtime budget，以及适用时的 DAG definition/manifest。</li>
+<li><strong>获得 revision：</strong>Publish 生成不可变 <code>AgentConfigSnapshot.revision</code>；正在执行或已经创建的 Run 继续使用其固定 revision。</li>
+</ol>
+<div class="note"><strong>Response Contract 的真实存储：</strong>UI 中的最终响应 instructions 会成为 <code>response_contract</code> Instruction Block；mode/name/schema 位于 <code>metadata.responseContract</code>。两者用途不同，不应描述成一个独立的 AgentConfig 一级字段。</div>
+
+<h3>2.6 创建 Deployment、启动 AgentInstance</h3>
+<table>
+<tr><th>阶段</th><th>ControlPlane / Gateway 行为</th><th>外部平台行为</th></tr>
+<tr><td>创建 Deployment</td><td>持久化 <code>agentId + configRevision + runtimeKind + scaling + workload/runtime env</code>，生成 Docker Compose 或 Kubernetes YAML</td><td>下载并审查 manifest</td></tr>
+<tr><td>发布后 revision 更新</td><td>当前 Publish 流程会把该 Agent 的已有 Deployment 自动同步到新 <code>configRevision</code></td><td>是否需要镜像或资源滚动取决于 workload 变更；仅 Prompt/配置 revision 变化不等于重建 Tool 镜像</td></tr>
+<tr><td>启动 workload</td><td>FalconCore 本身不调用 Docker/Kubernetes API 创建 workload</td><td>应用 Compose/YAML，启动一个或多个通用 AgentInstance</td></tr>
+<tr><td>注册与 Ready</td><td>校验 bootstrap token、deployment identity 和 revision；返回 AgentInstance registration session（<code>sessionId + sessionToken + registrationGeneration</code>）、lease 和 <code>desiredConfigRevision</code></td><td>Instance 持续 heartbeat，报告 <code>loadedConfigRevision</code>、容量和状态</td></tr>
+</table>
+
+<pre># Docker：构建通用 AgentInstance 镜像
+pnpm run docker:build:agent-instance-minimal
+
+# 使用已持久化的 Deployment 和下载的 Compose 启动
+pnpm agent:deploy -- \
+  --deployment-id &lt;deployment-id&gt; \
+  --compose agent/&lt;deployment-id&gt;.docker-compose.yaml</pre>
+
+<ol>
+<li>先启动并初始化 RuntimeGateway、PostgreSQL、Redis、Provider stores 和 Capability dependencies。</li>
+<li>Docker 启动器校验 Compose，读取该 Deployment 的 bootstrap token，并只注入当前 Compose 子进程环境。</li>
+<li>AgentInstance 使用 <code>agentId + deploymentId + bootstrapToken</code> 注册，随后通过 heartbeat 维持 lease 并报告 capacity。</li>
+<li>只有 <code>loadedConfigRevision === desiredConfigRevision</code> 且 Instance 接受新 Run 时，Registry 才将其视为可分配容量。</li>
+<li>在 <strong>Agent Instances</strong> 页面确认 Ready 和 revision 一致，再发起实际 Run 验收。</li>
+</ol>
+<div class="boundary"><strong>Revision 说明：</strong>当前最小 AgentInstance 在注册或 heartbeat 返回 <code>reloadRequired</code> 时更新本地 revision 标记；这不是把 Prompt、Model 或 Tool executor 下载到 Instance。Gateway 仍按 Run 固定的 revision 创建并持有 RuntimeBundle。</div>
+
+<h3>2.7 上线验收：用同一个 Run 证明配置已经生效</h3>
+<p>Draft、Publish、Deployment 和 Instance Ready 分别只证明生命周期中的一个阶段。上线完成必须沿同一个 Run 同时验证配置版本、模型可见内容、Capability scope 和持久化执行证据。</p>
+<table>
+<tr><th>证据组</th><th>必须确认</th><th>失败时定位</th></tr>
+<tr><td>配置与容量</td><td>Run 固定到预期 <code>agentId + revision</code>；Deployment 指向该 revision；承接 Instance 为 Ready</td><td>Publish 结果、Deployment 自动同步、register/heartbeat、desired/loaded revision</td></tr>
+<tr><td>Prompt 与上下文</td><td>Prompt diagnostics 包含预期 System/Developer/Instruction Block，以及当前 scope 允许的 Skill instructions</td><td>enabled/content、重复抑制、受控 Prompt override、Skill materialization</td></tr>
+<tr><td>Capability surface</td><td>所需 Tool/Skill 同时 registered、available、exposed；模型只看到当前 iteration/DAG node 允许的 native schema</td><td>Definition、Executor/Provider dependency、AgentConfig、MCP policy、DAG scope</td></tr>
+<tr><td>Dispatch 与证据</td><td>readonly 正常执行；真实 write/dangerous 通过 authoritative permission 和本轮 write-intent；Transcript 有匹配的 call/result/error</td><td>schema、permission、writeIntentGrant、budget、dedupe/claim、toolCallId 和 unknown outcome</td></tr>
+<tr><td>最终输出</td><td>回答基于本轮真实 evidence，并经过有效 post-tool/output transform 和命中的 RuntimeVisibleOutputPolicy</td><td>模型是否虚构执行、post-tool continuation、output protocol、policy <code>appliesTo(run)</code></td></tr>
+<tr><td>可选 DAG</td><td>未命中时不存在 DAG node/claim/transition；命中时 resolver 只开放当前 node Capability，并持久化状态推进</td><td><code>planner.mode</code>、definition root condition、requestText、DAG state 和 Transcript evidence</td></tr>
+</table>
+<div class="note"><strong>验收结论：</strong>Draft 保存成功 ≠ revision 已生效；Publish 成功 ≠ Instance 已运行；Instance Ready ≠ 项目能力正确。至少保存 Run ID、固定 revision、Prompt diagnostics、effective Capability snapshot、Transcript events 和最终输出，才能证明 Agent 已按项目合同运行。</div>
+
+<h2>三、一个 Session 如何运作：多轮、调度、上下文与连续性</h2>
+
+<p>本章的 Session 指用户可感知的<strong>逻辑对话范围</strong>。它不是某个容器中的常驻 Agent，也不是 AgentInstance 注册返回的物理 <code>sessionId</code>。逻辑 Session 通过多个独立 RuntimeRun 延续；每个 RuntimeRun 内再发生一次第四章的 Agent Invocation。</p>
+
+<h3>3.1 先拆开三种 Session 和两个执行对象</h3>
+<table>
+<tr><th>对象</th><th>标识与作用域</th><th>作用</th><th>权威来源</th></tr>
+<tr><td>Logical Chat Session</td><td><code>chat:{agentId}:{user}:{threadId}</code></td><td>跨多轮查询历史、Memory、Summary 和 Session 级操作</td><td>RuntimeRun input/chat scope + PostgreSQL Run/Transcript</td></tr>
+<tr><td>HotSession</td><td><code>agentId + logicalSessionId</code>，带 TTL</td><td>优先把下一轮分给上次 Instance；容量不足或实例失效时标记重分配</td><td>Redis；仅为调度投影</td></tr>
+<tr><td>AgentInstance Registration Session</td><td><code>instanceId + sessionId + token + registrationGeneration</code></td><td>证明 worker 当前在线、配置已加载并拥有可用容量</td><td>Redis 在线态 + PostgreSQL lifecycle checkpoint</td></tr>
+<tr><td>RuntimeRun</td><td><code>runId</code>；一轮输入或一次系统触发</td><td>固定 Deployment revision、输入、assignment、activeAttemptId 和终态</td><td>SessionRunLedger / PostgreSQL</td></tr>
+<tr><td>RunAttempt</td><td><code>attemptId</code>；一次 assignment</td><td>把 Run 执行权 fence 到某个 Instance registration session</td><td>SessionRunLedger / PostgreSQL</td></tr>
+</table>
+<div class="boundary"><strong>最重要的边界：</strong>逻辑 Session 可以跨多个 RuntimeRun、多个 Attempt 和多个 AgentInstance registration session。HotSession 失效只影响调度粘性，不会删除历史；AgentInstance 重启也不会成为一个“新对话”。</div>
+
+<h3>3.2 Session 身份如何从输入产生</h3>
+<pre>Channel / Chat / sessions_send / sessions_spawn / cron
+  → 规范化 runtimeAgentInput
+       actor/user        → user
+       source.threadId   → threadId
+       agentId           → 当前 Agent
+  → runtimeChatSessionKey({ agentId, user, threadId })
+  → chat:{encoded-agentId}:{encoded-user}:{encoded-threadId}
+  → 作为 createRun.sessionId / input.sessionKey 参与 HotSession 与历史查询</pre>
+<ul>
+<li>ChannelIngress 还用外部 message identity 生成幂等键，重复投递不会创建语义不同的第二个 Run。</li>
+<li>没有可解析 chat scope 时仍可执行当前 Run，但上下文退化为当前物理 <code>assignedSessionId</code> 范围，不能自动获得跨 Instance 的逻辑对话历史。</li>
+<li>同一逻辑 Session 的后续 Run 可以固定到新的 configRevision；每个 Run 始终使用自己创建时固定的 revision，历史消息不会把旧 Prompt 配置重新激活。</li>
+</ul>
+
+<h3>3.3 一轮消息从 queued 到终态</h3>
+<pre>① RuntimeGateway.createRun()
+   校验 Agent/Deployment → 固定 configRevision → 写 queued Run
+② 查询 HotSession，并检查 preferred Instance 的 ready/config/capacity
+③ Redis 原子 reserve capacity
+④ assignRun()
+   写 assigned owner，并立即创建 assigned RunAttempt + activeAttemptId
+⑤ AgentInstance poll assigned runs
+⑥ claimRun()
+   校验 instanceId/sessionId/tokenHash/registrationGeneration
+   将 Run 与已有 Attempt 从 assigned 切到 running
+⑦ AgentInstance 记录 user_input，发起一次顶层 Gateway 调用
+⑧ RuntimeGateway 完成 Agent Invocation、Capability 和 Provider 执行
+⑨ AgentInstance 记录 assistant_output，提交 completeRun()
+⑩ Gateway 校验当前 owner/activeAttemptId，写不可逆终态并释放容量</pre>
+<table>
+<tr><th>阶段</th><th>创建或修改的事实</th><th>失败/竞争语义</th></tr>
+<tr><td>Create</td><td>queued RuntimeRun、pinned revision、idempotency identity</td><td>Deployment 不匹配、队列上限或幂等 payload 冲突时拒绝</td></tr>
+<tr><td>Reserve</td><td>Redis run lease/capacity reservation</td><td>没有匹配实例返回 no_capacity；仅容量已满则保留 queued</td></tr>
+<tr><td>Assign</td><td>assigned owner、registrationGeneration、activeAttemptId、assigned Attempt</td><td>assignment 失败必须释放已预留容量</td></tr>
+<tr><td>Claim</td><td>Run/Attempt → running、Run.startedAt</td><td>旧 registration session、错误 token 或错误 generation 无权 claim</td></tr>
+<tr><td>Complete</td><td>Run/Attempt terminal、terminal reason、capacity release</td><td>旧 owner 或迟到 Attempt 不能逆向推进当前 Run</td></tr>
+</table>
+
+<h3>3.4 HotSession：有粘性，但不绑定历史</h3>
+<p>创建新 Run 时，Gateway 先用逻辑 Session 查询 HotSession。原 Instance 可用且有容量时优先 sticky assignment；原 Instance 暂时容量满时可把 Run 定向排队；实例离线、配置不匹配或需要迁移时重新选择，并递增 HotSession binding generation。</p>
+<table>
+<tr><th>情况</th><th>调度结果</th><th>Session 历史</th></tr>
+<tr><td>首次运行</td><td><code>initial_assignment</code></td><td>从空历史或已有同 chat scope 事实开始</td></tr>
+<tr><td>原 Instance 可用</td><td><code>sticky</code></td><td>继续按逻辑 scope 读取，不依赖本机内存</td></tr>
+<tr><td>原 Instance 容量已满</td><td>定向 queued，或后续 <code>reassigned_due_to_capacity</code></td><td>不受影响</td></tr>
+<tr><td>原 Instance 不可用</td><td><code>instance_unavailable</code>，重新 reserve/assign</td><td>通过 Run scope 跨物理 session 重建</td></tr>
+</table>
+<div class="note"><strong>实现语义：</strong>HotSession bind 失败会记录诊断，但不会回滚一个已经合法 assigned 的 RuntimeRun；这说明它是性能和亲和性投影，不是执行事实。</div>
+
+<h3>3.5 Transcript 如何跨 Run、跨 Instance 重建 Session 历史</h3>
+<pre>当轮物理写入：
+  user / assistant / tool events
+  → sessionId = run.assignedSessionId
+  → 同时携带 runId、attemptId、messageRef、toolCallId 等身份
+
+下一轮读取：
+  agentId + user + threadId
+  → listRunsByChatScope()
+  → 得到历史 runIds 与各自 assignedSessionId
+  → listMessagesByRunIdsAcrossSessions()
+  → rollback pruning
+  → canonical Attempt branch selection
+  → incomplete Tool exchange sanitation
+  → 当前 Session history</pre>
+<p><code>transcriptSessionId</code> 是当前 Run 的物理写入 session；<code>contextSessionId</code> 是逻辑 chat key，用于 Summary、Memory 和 compaction checkpoint。二者不能互换。</p>
+
+<h3>3.6 每一轮如何从 Session 历史装配 Context</h3>
+<p><code>TranscriptBackedRunContextAssembler.assemble()</code> 不会把全部历史原样塞给模型。它先为输出和 native Capability schema 预留 Token，再按预算组合当前 Run 的 Agent Prompt、当前时间、用户消息、Preferences、Memory、Summary 和最近历史。</p>
+<pre>maxContextTokens
+  - reservedOutputTokens
+  - reservedNativeToolTokens
+  - Agent Prompt / runtime datetime
+  - current user message
+  - UserPreferences
+  - Memory
+  = history + summary 可用预算</pre>
+<ul>
+<li>超预算历史进入 compaction；replacement checkpoint 和 summary 通过 fingerprint/configRevision 校验后复用。</li>
+<li>当前 payload 已记录的 user message 会从历史窗口排除一次，防止当前消息重复投影。</li>
+<li>Tool 记录先经过 canonical branch、rollback 和完整 call/result 配对清洗，未完成副作用不能作为普通成功上下文。</li>
+<li>装配结果写入 diagnostics：included/omitted refs、summary usage、token budget、truncation 和 replacement checkpoint 状态。</li>
+</ul>
+
+<h3>3.7 完成一轮后，下一轮继承什么</h3>
+<table>
+<tr><th>内容</th><th>是否跨轮</th><th>继承方式</th></tr>
+<tr><td>User / Assistant / Tool evidence</td><td>是</td><td>按 chat scope 查询历史 RuntimeRun，再跨物理 session 读取 Transcript</td></tr>
+<tr><td>Summary / replacement checkpoint</td><td>是</td><td>按逻辑 contextSessionId 和 policy/config fingerprint 复用</td></tr>
+<tr><td>Memory / UserPreferences</td><td>按 policy</td><td>当前轮成功后可入队提取；下一轮按 Agent、User、Session scope 检索</td></tr>
+<tr><td>HotSession assignment</td><td>短期、非保证</td><td>Redis TTL；仅作为 preferred Instance</td></tr>
+<tr><td>activeAttemptId / write-intent grant</td><td>否</td><td>严格属于当前 Run/Attempt/当前轮；下一轮重新计算</td></tr>
+<tr><td>DAG plan state</td><td>仅同一 DAG RuntimeRun</td><td>Persistent DAG store；不能因聊天 Session 相同而自动跨 Run 续接</td></tr>
+</table>
+
+<h3>3.8 Session 控制、子 Session 与流式输出</h3>
+<table>
+<tr><th>能力</th><th>真实行为</th><th>边界</th></tr>
+<tr><td><code>sessions_send</code></td><td>向当前用户可访问的另一个 thread 创建新的 RuntimeRun</td><td>不是直接修改目标 Session 内存</td></tr>
+<tr><td><code>sessions_spawn</code></td><td>为同一 Agent 创建隔离 child thread/Run，并应用 researcher/coder/reviewer/planner role overlay</td><td>不能调用另一个固定 Agent Deployment；当前实现限制嵌套深度</td></tr>
+<tr><td><code>sessions_yield</code></td><td>持久化 parent wait；child terminal 后 reconciler 创建一个新的 parent resume Run</td><td>不是暂停原 JavaScript 调用栈；resume Run 使用幂等键且禁用再次 Tool Loop</td></tr>
+<tr><td><code>sessions_abort</code></td><td>取消目标 chat scope 内仍 active 的 RuntimeRun</td><td>不删除历史，也不能取消当前正在执行该 Tool 的自身 Session</td></tr>
+</table>
+<p>Chat Facade 在 Run 执行期间桥接 StreamingEventChannel。正常语义是 started/activity/message/final/done；带 <code>streamId</code> 的 server-side failed Run 会尝试幂等追加 <code>run.failed</code> 并关闭流。Streaming events 是通知面，最终状态仍以 Run ledger 和 Transcript 为准。</p>
+<div class="boundary"><strong>Session 总结：</strong>逻辑 Session 提供连续性，RuntimeRun 提供一轮执行事实，RunAttempt 提供一次 owner fence，AgentInstance registration session 提供物理执行资格。它们通过 ID 关联，但不能合并成同一个“Session 状态”。</div>
+
+<h2>四、一个 Agent 如何运作执行：从 pinned Bundle 到最终输出</h2>
+
+<h3>4.1 AgentInstance 与 RuntimeGateway 如何共同完成一轮</h3>
+<p>AgentInstance 是 Run worker，不是智能循环的宿主。它持有当前 registration session 和容量，在 claim 后根据 modality 调用 Gateway；RuntimeGateway 才读取 pinned RuntimeBundle、装配模型输入、运行 Capability Harness、调用 Provider/Executor 并形成可持久化结果。</p>
+<pre>AgentInstance（每个 Run 的外层控制）
+  → poll assigned Run
+  → claim current Attempt
+  → text: append user_input → assemble context → invoke/stream model
+     tool: invoke durable direct Tool
+     skill: invoke durable direct Skill
+  → append assistant_output（text）
+  → submit completion；提交失败则保留 pending completion 重试
+
+RuntimeGateway（单次 Agent Invocation 的内部执行）
+  → resolve owned RuntimeRunRecord + pinned RuntimeBundle
+  → assemble Session Context
+  → build Effective Capability Snapshot / Directory
+  → choose Direct Provider / ordinary Harness / Persistent DAG scope
+  → one or more model steps and optional Capability Dispatch
+  → output transforms / visible-output policies
+  → return final result to AgentInstance</pre>
+<table>
+<tr><th>modality</th><th>是否经过主模型选择</th><th>顶层执行合同</th></tr>
+<tr><td><code>text</code></td><td>是；可能包含多个内部 model steps</td><td>Instance 对 Gateway 只发起一次顶层 invoke/stream；内部 Tool Loop/DAG 由 Gateway 完成</td></tr>
+<tr><td><code>tool</code></td><td>否</td><td>直接进入 <code>invokeDurableDirectTool()</code>；仍校验 exposure、permission、claim、budget 和 Transcript</td></tr>
+<tr><td><code>skill</code></td><td>否</td><td>直接进入 <code>invokeDurableDirectSkill()</code>；要求 pinned exposure 与 direct-invokable contract</td></tr>
+</table>
+<div class="note"><strong>一次 Invocation 的固定输入：</strong><code>RuntimeRunRecord</code>、当前 <code>activeAttemptId</code>、pinned <code>configRevision</code> 对应的 RuntimeBundle、当前 payload、已持久化 Transcript，以及 Gateway composition 中的 Registry/Provider/Policy。模型输出无权修改这些权威输入。</div>
+
+<h3>4.2 RuntimeRunProxy 入口与执行路径判定</h3>
+<p>在 <strong>text/model Agent Invocation</strong> 范围内，<code>RuntimeCapabilityHarness</code> 有两种主要编排模式：普通主模型 Capability Harness，以及条件命中的 Persistent DAG。其他对象不是与它们平级的业务分支：<code>RuntimeRunProxy</code> 是入口协调器，Shared Capability Dispatch 是两种模式复用的安全执行管线，<code>update_plan</code> 只是其中一个普通展示状态 Tool。</p>
+
+<pre>text/model Runtime Invocation
+└─ RuntimeRunProxy                         入口协调器
+   ├─ tryRunCapabilityHarness()
+   │  └─ RuntimeCapabilityHarness       Capability Harness 编排器
+   │
+   │     ├─ Persistent DAG 不适用
+   │     │  ├─ 普通 Capability Harness 满足接管条件
+   │     │  │  └─ 主模型决定 Capability 调用
+   │     │  │     └─ Shared Capability Dispatch
+   │     │  ├─ 只有 prompt-only Skill
+   │     │  │  └─ Capability Harness 内部 Direct Provider Invocation
+   │     │  └─ 无可接管 Capability → handled:false
+   │     │
+   │     └─ Persistent DAG 适用
+   │        └─ resolver：固定 definition + 持久化 state/evidence
+   │           ├─ active executable node
+   │           │  └─ bounded Capability Harness
+   │           │     └─ Shared Capability Dispatch
+   │           └─ completed / blocked / lightweight / empty scope
+   │              └─ 受控 Direct Provider Invocation、clarification 或 fail-closed
+   │
+   └─ tryRunCapabilityHarness() 返回 handled:false
+      └─ RuntimeRunProxy 外层 Direct Provider Invocation</pre>
+
+<table>
+<tr><th>层级</th><th>组件/模式</th><th>当前代码职责与边界</th></tr>
+<tr><td>入口协调</td><td><strong>RuntimeRunProxy</strong></td><td>解析并校验 RuntimeRun，先尝试 <code>tryRunCapabilityHarness()</code>；只有返回 <code>handled:false</code> 时进入外层 Direct Provider Invocation。它不生成 DAG definition，也不推进 DAG node。</td></tr>
+<tr><td>Capability Harness 编排</td><td><strong>RuntimeCapabilityHarness</strong></td><td>执行 preflight，并承载普通主模型 Capability Harness 与适用的 Persistent DAG 两种编排模式；它内部也可为 prompt-only、clarification、terminal/fail-closed response 调用 Direct Provider Invocation。</td></tr>
+<tr><td>编排模式 1</td><td><strong>普通 Capability Harness</strong></td><td>未命中 DAG，且 payload 未关闭、模型支持 native tools、Registry 可用并存在 executable Capability 时，主模型在完整有效目录内决定调用、参数、继续或结束；没有 DAG plan/node/claim/transition。</td></tr>
+<tr><td>编排模式 2</td><td><strong>Persistent DAG</strong></td><td>命中后由 resolver 按固定 definition、持久化 state 与 Transcript evidence 解析当前 node scope。只有 active executable node 才复用 bounded Capability Harness；completed/blocked、prompt-only/lightweight 或空 scope 走受控收尾。它不是独立 Planner Runtime，也不动态生成完整 Execution Plan。</td></tr>
+<tr><td>共享执行管线</td><td><strong>Shared Capability Dispatch</strong></td><td>统一重新校验 exposure、schema、authoritative permission、required inputs、budget、dedupe/claim、Transcript，并调用 Executor/Provider。具有真实执行权的 write/dangerous Tool 必须有当前轮 write-intent；DAG admission 不能替代该授权。</td></tr>
+<tr><td>具体 Capability</td><td><strong><code>update_plan</code> Tool</strong></td><td>permission 为 <code>write</code>，但 Definition 明确标记 <code>plan_display + executionAuthority=false + userVisibleOnly=true</code>，因此只对它绕过 semantic write-intent grant；显式负向写约束仍可拒绝。<code>PlanProvider.update()</code> 保存 agent/actor/session 作用域的展示计划，不调度模型、不决定 Capability scope、不推进 DAG。</td></tr>
+</table>
+
+<div class="boundary"><strong>准确心智模型：</strong>两条主干指 RuntimeCapabilityHarness 内的两种 <em>Capability 编排模式</em>，不是整个 Runtime 只有两种执行方式。Direct Provider Invocation 是没有 native Capability 循环时的模型调用路径；<code>update_plan</code> 是普通展示状态 Tool；Shared Capability Dispatch 是公共安全门，不是第三条分支。除此之外，<code>tool</code>/<code>skill</code> modality 还可直接进入共享 Capability 执行管线。</div>
+
+<h3>4.3 基础 Context 与 Prompt 的权威装配</h3>
+<p><code>TranscriptBackedRunContextAssembler.assemble()</code> 构造基础 Session Context；Capability Harness 随后按当前 execution scope 增量加入 Skill instructions、native Capability schema 和本轮 Tool evidence。因此 ContextAssembler 是基础上下文入口，但不是所有模型可见信息的唯一生产者。</p>
+<ol>
+<li>优先按逻辑 Chat Scope（<code>agentId + user + threadId</code>）查找该对话的多个 Run，再跨这些 Run/物理 assignment session 读取 Transcript；缺少 Chat Scope 时才退化为当前物理 <code>assignedSessionId</code>。</li>
+<li>对候选历史清洗 rollback、非 canonical attempt 和不完整 Tool exchange，避免失败或被替换 Attempt 的内容重新进入模型上下文。</li>
+<li>按已发布 Memory policy 条件性检索 UserPreferences/Memory；没有 policy、retriever 或权限时不参与。</li>
+<li>计算 <code>maxInputTokens = maxContextTokens - reservedOutputTokens - nativeToolContextTokens</code>。</li>
+<li>组合 System/Developer Prompt、Instruction Blocks、当前用户输入、Preferences、Memory 和 History/Summary。</li>
+<li>只有预算不足且确实省略了历史时才触发 compaction/summary；replacement checkpoint 可以复用。</li>
+<li>每次需要重建 payload 时，Conversation Context Service 再按当前 scope 注入 prompt-bearing Skill，并记录 prompt assembly diagnostics。</li>
+</ol>
+<table>
+<tr><th>内容</th><th>来源</th><th>是否属于基础 Context</th></tr>
+<tr><td>System/Developer/Instruction Blocks</td><td>固定 revision 的 RuntimeBundle</td><td>是；受控阶段可 suppress/override</td></tr>
+<tr><td>当前用户输入、History/Summary</td><td>Run input + Transcript/compaction checkpoint</td><td>是</td></tr>
+<tr><td>Preferences/Memory</td><td>已启用 policy 对应的 store/retriever</td><td>条件性加入</td></tr>
+<tr><td>Skill instructions</td><td>当前 execution scope 中的 prompt-bearing Skill</td><td>否；在 Agent Invocation 增量加入</td></tr>
+<tr><td>Native Tool/Callable Skill schema</td><td>当前 iterationDirectory</td><td>否；作为 Provider native tool contract 单独传入</td></tr>
+<tr><td>本轮 Tool result</td><td>持久化后的 Tool evidence</td><td>在下一 model step 重建 messages 时加入</td></tr>
+</table>
+
+<h3>4.4 Capability 投影与主模型循环</h3>
+<p>本节是单次 Agent Invocation 的权威执行链。重点不是笼统地说“把 Tool/Skill 给模型”，而是区分 Runtime 内部目录、Prompt instructions、Transcript evidence 与 Provider native schema：四者不是同一份数据，也不在同一时点产生。</p>
+<div class="diagram">
+<svg viewBox="0 0 1000 1080" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="a3" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#4361ee"/></marker></defs>
+  <rect x="300" y="18" width="400" height="58" rx="8" fill="#d8f3dc" stroke="#2d6a4f" stroke-width="2"/><text x="500" y="42" text-anchor="middle" font-size="12" font-weight="700">RuntimeRun + pinned Agent Bundle</text><text x="500" y="61" text-anchor="middle" font-size="9">model / prompts / tools / skills / runtimePolicy / configRevision</text>
+  <line x1="500" y1="76" x2="500" y2="104" stroke="#4361ee" stroke-width="2" marker-end="url(#a3)"/>
+  <rect x="285" y="106" width="430" height="72" rx="8" fill="#edf8f0" stroke="#2d6a4f"/><text x="500" y="131" text-anchor="middle" font-size="12" font-weight="700">Build Effective Capability Snapshot + Directory</text><text x="500" y="151" text-anchor="middle" font-size="9">Registry definition + exposure + dynamic MCP tools + permission</text><text x="500" y="168" text-anchor="middle" font-size="9">内部字段：roles / dispatch target / required inputs / promptOnly / executionToolName</text>
+  <line x1="500" y1="178" x2="500" y2="216" stroke="#4361ee" stroke-width="2" marker-end="url(#a3)"/>
+  <rect x="285" y="218" width="430" height="120" rx="8" fill="#fff3cd" stroke="#f59f00" stroke-width="2"/><text x="500" y="244" text-anchor="middle" font-size="12" font-weight="700">Resolve execution scope in Capability Harness</text><text x="500" y="267" text-anchor="middle" font-size="9">普通分支：不调用 scope resolver；完整 executable directory + main_model owner</text><text x="500" y="288" text-anchor="middle" font-size="9">DAG 适用：resolveRuntimeToolScopeStep() 要求 persistent_dag owner</text><text x="500" y="309" text-anchor="middle" font-size="9">固定 definition/state → 当前 node scopedDirectory；不动态生成业务 Plan</text><text x="500" y="328" text-anchor="middle" font-size="9">scope 约束本轮可见 Capability、toolChoice、parallel 与 maxSteps</text>
+  <line x1="500" y1="338" x2="500" y2="405" stroke="#4361ee" stroke-width="2" marker-end="url(#a3)"/>
+  <rect x="410" y="407" width="180" height="42" rx="8" fill="#e3f2fd" stroke="#1d3557"/><text x="500" y="432" text-anchor="middle" font-size="11" font-weight="700">当前 iterationDirectory</text>
+  <line x1="500" y1="449" x2="500" y2="480" stroke="#4361ee" stroke-width="2" marker-end="url(#a3)"/>
+
+  <rect x="25" y="482" width="300" height="138" rx="8" fill="#f3e8ff" stroke="#7b2cbf"/><text x="175" y="507" text-anchor="middle" font-size="11" font-weight="700">① Prompt channel</text><text x="175" y="529" text-anchor="middle" font-size="9">systemPrompt + developerPrompt</text><text x="175" y="548" text-anchor="middle" font-size="9">instructionBlocks</text><text x="175" y="567" text-anchor="middle" font-size="9">当前 scope 内 prompt-bearing Skill instructions</text><text x="175" y="586" text-anchor="middle" font-size="9">prompt-only Skill 只走此通道</text><text x="175" y="605" text-anchor="middle" font-size="9">buildCapabilityHarnessPayloadWithContext()</text>
+  <rect x="350" y="482" width="300" height="138" rx="8" fill="#edf8f0" stroke="#2d6a4f"/><text x="500" y="507" text-anchor="middle" font-size="11" font-weight="700">② Evidence / context channel</text><text x="500" y="529" text-anchor="middle" font-size="9">current user + bounded Transcript</text><text x="500" y="548" text-anchor="middle" font-size="9">canonical attempt / rollback / tool replay 清洗</text><text x="500" y="567" text-anchor="middle" font-size="9">按 enabledTranscriptCapabilities 过滤</text><text x="500" y="586" text-anchor="middle" font-size="9">prior verified evidence + 本轮 step results</text><text x="500" y="605" text-anchor="middle" font-size="9">受 ContextAssembler Token Budget 约束</text>
+  <rect x="675" y="482" width="300" height="138" rx="8" fill="#e3f2fd" stroke="#1d3557"/><text x="825" y="507" text-anchor="middle" font-size="11" font-weight="700">③ Native capability channel</text><text x="825" y="529" text-anchor="middle" font-size="9">每个 model step 重新解析 iterationDirectory</text><text x="825" y="548" text-anchor="middle" font-size="9">Tool + native-callable Skill</text><text x="825" y="567" text-anchor="middle" font-size="9">kind / name / description / parameters</text><text x="825" y="586" text-anchor="middle" font-size="9">toolChoice + parallelToolCalls</text><text x="825" y="605" text-anchor="middle" font-size="9">buildNativeToolCallPayload()</text>
+  <path d="M175 620 L175 650 L440 650" fill="none" stroke="#4361ee" stroke-width="1.5" marker-end="url(#a3)"/><line x1="500" y1="620" x2="500" y2="648" stroke="#4361ee" stroke-width="1.5" marker-end="url(#a3)"/><path d="M825 620 L825 650 L560 650" fill="none" stroke="#4361ee" stroke-width="1.5" marker-end="url(#a3)"/>
+  <rect x="390" y="650" width="220" height="52" rx="8" fill="#d8f3dc" stroke="#2d6a4f" stroke-width="2"/><text x="500" y="672" text-anchor="middle" font-size="12" font-weight="700">Provider model step</text><text x="500" y="690" text-anchor="middle" font-size="9">messages + nativeToolCall contract</text>
+  <line x1="500" y1="702" x2="500" y2="730" stroke="#4361ee" stroke-width="2" marker-end="url(#a3)"/>
+  <polygon points="500,733 625,772 500,811 375,772" fill="#fff3cd" stroke="#f59f00" stroke-width="2"/><text x="500" y="768" text-anchor="middle" font-size="11" font-weight="700">返回 native tool_calls?</text><text x="500" y="786" text-anchor="middle" font-size="9">0、1 或普通模式下的安全 batch</text>
+
+  <path d="M375 772 L205 772 L205 837" fill="none" stroke="#2d6a4f" stroke-width="2" marker-end="url(#a3)"/><text x="290" y="762" text-anchor="middle" font-size="9" fill="#2d6a4f">否</text>
+  <rect x="25" y="839" width="360" height="116" rx="8" fill="#edf8f0" stroke="#2d6a4f"/><text x="205" y="864" text-anchor="middle" font-size="11" font-weight="700">Zero-tool / final decision</text><text x="205" y="886" text-anchor="middle" font-size="9">optional response / post-tool synthesis</text><text x="205" y="905" text-anchor="middle" font-size="9">zero-tool semantic recovery</text><text x="205" y="924" text-anchor="middle" font-size="9">requireToolCall bounded retry</text><text x="205" y="943" text-anchor="middle" font-size="9">失败或预算耗尽 → fail-closed final</text>
+  <path d="M625 772 L795 772 L795 837" fill="none" stroke="#e76f51" stroke-width="2" marker-end="url(#a3)"/><text x="710" y="762" text-anchor="middle" font-size="9" fill="#e76f51">是</text>
+  <rect x="615" y="839" width="360" height="116" rx="8" fill="#ffddd2" stroke="#e76f51"/><text x="795" y="864" text-anchor="middle" font-size="11" font-weight="700">Normalize + shared Dispatch</text><text x="795" y="886" text-anchor="middle" font-size="9">schema / scope / argument normalization</text><text x="795" y="905" text-anchor="middle" font-size="9">permission / execution-authority write intent / dedupe</text><text x="795" y="924" text-anchor="middle" font-size="9">可选 execution-owner fence → Provider execute</text><text x="795" y="943" text-anchor="middle" font-size="9">持久化 tool.call / tool.result / tool.error</text>
+  <path d="M795 955 L795 988 L590 988" fill="none" stroke="#4361ee" stroke-width="2" marker-end="url(#a3)"/><path d="M205 955 L205 988 L410 988" fill="none" stroke="#4361ee" stroke-width="2" marker-end="url(#a3)"/>
+  <polygon points="500,968 610,1005 500,1042 390,1005" fill="#fff3cd" stroke="#f59f00"/><text x="500" y="1001" text-anchor="middle" font-size="11" font-weight="700">继续且仍有预算?</text><text x="500" y="1019" text-anchor="middle" font-size="9">由输入分支的 continuation owner 决定继续或 re-scope</text>
+  <path d="M390 1005 L15 1005 L15 551 L23 551" fill="none" stroke="#2d6a4f" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#a3)"/><text x="185" y="995" text-anchor="middle" font-size="9" fill="#2d6a4f">是：带真实结果进入下一 model step</text>
+  <path d="M610 1005 L810 1005 L810 1052" fill="none" stroke="#4361ee" stroke-width="2" marker-end="url(#a3)"/><text x="710" y="995" text-anchor="middle" font-size="9">否</text>
+  <rect x="675" y="1035" width="270" height="40" rx="8" fill="#e3f2fd" stroke="#1d3557"/><text x="810" y="1059" text-anchor="middle" font-size="11" font-weight="700">Finalize + transforms + events</text>
+</svg>
+</div>
+<h4>Capability 信息在什么时候给模型</h4>
+<table>
+<tr><th>信息</th><th>注入时点</th><th>模型实际收到的形式</th></tr>
+<tr><td>Agent system/developer/instruction blocks</td><td>首轮及需要重建 payload 时</td><td>System 与 instruction blocks 进入 <code>system</code>；Developer Prompt 在基础 Session Context 可保留 <code>developer</code> role，在 Capability Harness Conversation Context 当前投影为 <code>system</code>；均记录 assembly diagnostics</td></tr>
+<tr><td>Prompt-bearing Skill instructions</td><td>scope 确定后、Provider 调用前</td><td><code>system</code> messages；只装配当前允许的 Skill。prompt-only Skill 只走此通道</td></tr>
+<tr><td>Native Tool</td><td>每个 model step 开始时</td><td><code>nativeToolCall.tools[]</code> 中的 <code>kind/name/description/parameters</code></td></tr>
+<tr><td>Native-callable Skill</td><td>每个 model step 开始时</td><td>同样进入 <code>nativeToolCall.tools[]</code>，但 <code>kind="skill"</code>；若它也有 prompt role，还会同时进入 Prompt 通道</td></tr>
+<tr><td>Dispatch Skill alias</td><td>Directory 构建并解析 native capability 时</td><td>以公开 alias 暴露给模型，执行时通过 <code>executionToolName</code> 映射到目标 Tool</td></tr>
+<tr><td>历史 Capability evidence</td><td>Capability Harness payload/context 重建时</td><td>经过 canonical-attempt、rollback、scope 与 capability 过滤的 Transcript messages</td></tr>
+<tr><td>当前轮 Tool/Skill result</td><td>真实执行并持久化之后</td><td>作为下一轮 messages/evidence；没有完成结果就不能声称已执行</td></tr>
+<tr><td>Output-protocol Skill</td><td>post-tool response / output-structure 阶段</td><td>阶段化 Skill prompt 和/或 output transform，不等同于可调用 Tool</td></tr>
+</table>
+<ul>
+<li><strong>Directory 是 Runtime 内部控制结构，不会原样交给模型。</strong>它先经过 scope，再分别投影为 Prompt、Evidence 和 native schema。</li>
+<li>Skill 的角色是正交的：同一个 Skill 可以既提供 Prompt instruction，又作为 native capability 被调用；不能只按“prompt-only / callable”二选一理解。</li>
+<li>普通分支由主模型决定下一步；Persistent DAG 分支由 DAG evidence/re-scope 决定下一 node。两者只复用本节的模型调用、Capability 投影和 Dispatch 执行能力。</li>
+<li>Provider retry/failover 只允许在流提交前按 Provider 规则进行；Tool retry 是第五章的独立规则。</li>
+</ul>
+
+<h3>4.5 Persistent DAG：固定工作流状态机，复用模型与 Capability 执行</h3>
+<p>Persistent DAG 不是由模型动态生成的业务 Execution Plan。它来自 pinned Agent Bundle 中预先发布并校验的 DAG definition；RuntimeCapabilityHarness 仅在 <code>planner.mode="dag"</code> 且 root entry condition 匹配当前 requestText 时选择 DAG resolver。resolver 结合固定 definition 与当前持久化 state，解析本轮应推进的 node 及其 Capability scope。</p>
+<div class="diagram">
+<svg viewBox="0 0 1000 790" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="a4" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6Z" fill="#7b2cbf"/></marker></defs>
+  <rect x="275" y="18" width="450" height="58" rx="8" fill="#f3e8ff" stroke="#7b2cbf" stroke-width="2"/><text x="500" y="42" text-anchor="middle" font-size="12" font-weight="700">Capability Harness selects Persistent DAG resolver</text><text x="500" y="61" text-anchor="middle" font-size="9">pinned mode=dag + root condition match + Registry + durable Transcript + no parallel tools</text>
+  <line x1="500" y1="76" x2="500" y2="106" stroke="#7b2cbf" stroke-width="2" marker-end="url(#a4)"/>
+  <rect x="300" y="108" width="400" height="72" rx="8" fill="#f7efff" stroke="#7b2cbf"/><text x="500" y="132" text-anchor="middle" font-size="12" font-weight="700">resolveRuntimeToolScopeStep(initial)</text><text x="500" y="152" text-anchor="middle" font-size="9">RuntimePlannerDagToolScopeResolver → Engine → Plan Store</text><text x="500" y="169" text-anchor="middle" font-size="9">固定 DAG 匹配后解析/claim active node，输出 scopedDirectory / override</text>
+  <line x1="500" y1="180" x2="500" y2="210" stroke="#7b2cbf" stroke-width="2" marker-end="url(#a4)"/>
+  <polygon points="500,213 625,252 500,291 375,252" fill="#fff3cd" stroke="#f59f00" stroke-width="2"/><text x="500" y="248" text-anchor="middle" font-size="11" font-weight="700">scope 有 executable Capability?</text><text x="500" y="266" text-anchor="middle" font-size="9">promptOnly 不计入 executable scope</text>
+
+  <path d="M375 252 L195 252 L195 325" fill="none" stroke="#e76f51" stroke-width="2" marker-end="url(#a4)"/><text x="285" y="242" text-anchor="middle" font-size="10" fill="#e76f51">否</text>
+  <rect x="25" y="327" width="340" height="150" rx="8" fill="#fff1f2" stroke="#e76f51"/><text x="195" y="351" text-anchor="middle" font-size="11" font-weight="700">No executable scope</text><text x="195" y="374" text-anchor="middle" font-size="9">prompt-only Skills → Direct Provider Invocation response</text><text x="195" y="394" text-anchor="middle" font-size="9">lightweightPrompt → suppressed/overridden prompt response</text><text x="195" y="414" text-anchor="middle" font-size="9">missing inputs → deterministic clarification</text><text x="195" y="434" text-anchor="middle" font-size="9">non-executing/fail-closed → guarded no-execution response</text><text x="195" y="454" text-anchor="middle" font-size="9">没有适用处理 → handled:false</text>
+
+  <path d="M625 252 L805 252 L805 325" fill="none" stroke="#7b2cbf" stroke-width="2" marker-end="url(#a4)"/><text x="715" y="242" text-anchor="middle" font-size="10" fill="#7b2cbf">是</text>
+  <rect x="635" y="327" width="340" height="150" rx="8" fill="#f3e8ff" stroke="#7b2cbf"/><text x="805" y="351" text-anchor="middle" font-size="11" font-weight="700">Scoped bounded Capability Harness</text><text x="805" y="374" text-anchor="middle" font-size="9">模型只看到 scopedDirectory；按 scope 决定 tool choice</text><text x="805" y="394" text-anchor="middle" font-size="9">要求单 Capability；多调用/越界调用 fail closed</text><text x="805" y="414" text-anchor="middle" font-size="9">dispatch 携带 plannerNodeId + node dedupeScope</text><text x="805" y="434" text-anchor="middle" font-size="9">planner fence admission + 共享 Dispatch 安全门控</text><text x="805" y="454" text-anchor="middle" font-size="9">result/error 形成 node evidence</text>
+
+  <line x1="805" y1="477" x2="805" y2="510" stroke="#7b2cbf" stroke-width="2" marker-end="url(#a4)"/>
+  <rect x="635" y="512" width="340" height="90" rx="8" fill="#e3f2fd" stroke="#7b2cbf"/><text x="805" y="536" text-anchor="middle" font-size="11" font-weight="700">Durable evidence → state transition</text><text x="805" y="558" text-anchor="middle" font-size="9">先持久化 tool.result/error；replan 时 Engine 消费未观察 evidence</text><text x="805" y="578" text-anchor="middle" font-size="9">CAS 完成 active node，计算 dependency/condition，调度下一 ready node</text>
+  <line x1="805" y1="602" x2="805" y2="632" stroke="#7b2cbf" stroke-width="2" marker-end="url(#a4)"/>
+  <polygon points="805,635 915,670 805,705 695,670" fill="#fff3cd" stroke="#f59f00"/><text x="805" y="666" text-anchor="middle" font-size="11" font-weight="700">Plan terminal?</text><text x="805" y="683" text-anchor="middle" font-size="9">或 transition/replan 被拒绝</text>
+  <path d="M695 670 L500 670 L500 740" fill="none" stroke="#4361ee" stroke-width="2" marker-end="url(#a4)"/><text x="600" y="660" text-anchor="middle" font-size="9">是 / fail-closed</text>
+  <rect x="365" y="742" width="270" height="42" rx="8" fill="#e3f2fd" stroke="#1d3557"/><text x="500" y="768" text-anchor="middle" font-size="11" font-weight="700">Finalize / clarification / failure</text>
+  <path d="M915 670 L985 670 L985 143 L702 143" fill="none" stroke="#7b2cbf" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#a4)"/><text x="970" y="620" text-anchor="end" font-size="9" fill="#7b2cbf">否：resolveRuntimeToolScopeStep(replan)</text>
+  <path d="M195 477 L195 763 L363 763" fill="none" stroke="#4361ee" stroke-width="2" marker-end="url(#a4)"/>
+</svg>
+</div>
+<table>
+<tr><th>DAG 自己拥有</th><th>复用 Runtime 能力</th></tr>
+<tr><td>发布时固定的 definition/version/hash 与 request hash</td><td>RuntimeRun、pinned Agent Bundle 与 active-attempt 校验</td></tr>
+<tr><td><code>RuntimePlannerDagPlanRecord</code>、node states、transitionCount、revision</td><td>4.4 的 Prompt/Evidence/native capability 投影</td></tr>
+<tr><td>root/edge condition、dependsOn、argument value source、optional node</td><td><code>runBoundedCapabilityHarness()</code> 的模型调用和 Tool result 处理</td></tr>
+<tr><td>execution claim、单 dispatch admission、node dedupe scope</td><td>第五章的 schema、permission、execution-authority write-intent、budget 与 Provider dispatch</td></tr>
+<tr><td>completed/blocked、transition limit、indeterminate outcome recovery</td><td>Transcript tool.call/result/error 作为 durable evidence</td></tr>
+</table>
+<ul>
+<li>仅当 pinned <code>bundle.planner.mode="dag"</code> 且 definition 的参与 root 匹配本轮 requestText 时启用；不是模型先规划后动态选择 DAG。</li>
+<li>Active resolution 一次只允许一个 node Capability，禁止 parallel tools；Engine 持久化 node state，下一次 replan 只依据同 Run、同 plannerNodeId 的 durable evidence 推进。</li>
+<li>Registry、durable Transcript、authoritative resolver 或合法 scope 缺失时 fail closed；node claim/admission 只保护并发一致性和单次 dispatch，不授予用户写权限。恢复细节见 7.4。</li>
+</ul>
+
+<h3>4.6 共享出口、停止条件与不变量</h3>
+<table>
+<tr><th>结果</th><th>含义</th><th>后续</th></tr>
+<tr><td><code>handled:false</code></td><td>Capability Harness 不接管：未启用、无普通 Capability、隐式 native-tool 不支持，或 Persistent DAG 分支没有适用处理</td><td>RuntimeRunProxy 继续普通 Direct Provider Invocation 路径</td></tr>
+<tr><td><code>handled:true</code> + result</td><td>clarification、lightweight response、Tool result final、主模型 synthesis 或正常文本结果</td><td><code>applyOutputTransformsForRun()</code>，发布 assistant.final/run.completed</td></tr>
+<tr><td>继续下一 model step</td><td>Tool result 已写回 messages，策略允许继续且未超过 maxSteps/no-progress/protocol 约束</td><td>普通分支由主模型继续；Persistent DAG 分支先由 resolver/engine 根据 durable evidence 解析当前或下一 node scope</td></tr>
+<tr><td>replan</td><td>DAG node evidence 已持久化且 plan 未终止</td><td><code>resolveRuntimeToolScopeStep(replan)</code>；适用 DAG 必须由 persistent_dag owner 给出权威 decision，空/越界 scope fail closed</td></tr>
+<tr><td>异常</td><td>manifest、owner、scope、Transcript、dispatch 或 Provider 保护失败</td><td>抛给 RuntimeRunProxy/Instance，最终由 Run completion 记录失败</td></tr>
+</table>
+<div class="boundary"><strong>始终成立的不变量：</strong>Persistent DAG resolver/engine 只决定 node 状态与 Capability scope，不授予用户写权限；主模型只能在有效 surface 内产生调用；第五章的共享 Dispatch 永远重新校验 schema、authoritative permission、budget、dedupe、Transcript 和错误状态，并对具有真实执行权的 write/dangerous Tool 校验当前轮 write-intent。</div>
+
+<h2>五、Capability 安全执行与持久化证据</h2>
+
+<h3>5.1 从配置候选到本轮 Effective Capability Surface</h3>
+<p>第二章说明 Capability 如何实现和部署；本节只解释 Run 时怎样得到模型真正可见、可执行的 surface。任何单一来源都不能独立开放一项能力。</p>
+<pre>Gateway Registry definitions
+  ∩ runtime availability / executor dependencies
+  ∩ AgentConfig pinned exposure
+  + per-Run dynamic MCP exposure（受 server agent/role policy 限制）
+  ∩ subagent role overlay
+  ∩ 普通 Capability Harness 或当前 DAG node scope
+  = iterationDirectory
+      ├─ prompt-bearing Skill → Prompt channel
+      ├─ Tool / callable Skill → Provider native schema
+      └─ internal metadata → Dispatch 时重新校验</pre>
+<table>
+<tr><th>来源</th><th>进入候选 surface 的方式</th><th>最终执行方式</th></tr>
+<tr><td>内建 Tool</td><td>Registry definition + AgentConfig exposure + availability</td><td>Local Executor 或 Provider adapter</td></tr>
+<tr><td>内建 Skill</td><td>Prompt role、native role 或两者同时存在</td><td>prompt-only 只注入说明；callable Skill 调用 <code>invokeSkill()</code></td></tr>
+<tr><td>MCP Tool</td><td>启动期 discovery/注册；每个 Run 再按 agent/role allow/deny 计算 exposure</td><td>使用公开 safe name，Dispatch 时映射回 MCP server 的原始 toolName</td></tr>
+<tr><td>subagents / sessions_spawn</td><td>已注册 Capability，按当前 Agent 和子会话 role profile 收紧 scope</td><td>创建同一 Agent 的隔离子会话，不是调用另一个固定 Agent Deployment</td></tr>
+<tr><td>CallableAgent</td><td><span class="tag design">当前工作区未实现</span></td><td>不能按已落地跨 Agent RPC 使用</td></tr>
+</table>
+<p>MCP 当前支持 <code>stdio</code> 和 <code>streamable-http</code>，连接配置来自 <code>FALCONCORE_MCP_SERVERS_JSON</code>，不属于 AgentConfig。</p>
+
+<h3>5.2 从 model tool_call 到 durable evidence 的权威顺序</h3>
+<table>
+<tr><th>阶段</th><th>真实行为</th><th>失败语义</th></tr>
+<tr><td>1. Capability match</td><td>在已经物化并暴露给本轮模型的 native surface 按 name 匹配，再加载 Registry definition</td><td>未注册/未暴露 → <code>TOOL_CALL_REJECTED</code></td></tr>
+<tr><td>2. Arguments/schema</td><td>规范化参数并按 inputSchema 校验；Provider tool call 在允许时可做一次有界修正</td><td>仍不合法 → REJECTED</td></tr>
+<tr><td>3. Permission/intent</td><td>Registry definition + pinned exposure 解析 authoritative permission；具有真实执行权的 write/dangerous 需要绑定 runId、toolName、本轮 requesterText 的 writeIntentGrant。严格标记为 <code>plan_display + executionAuthority=false + userVisibleOnly=true</code> 的 Tool 可绕过正向 grant，但负向写约束、非空参数和 required inputs 仍会检查</td><td>未满足适用的授权/例外合同 → REJECTED</td></tr>
+<tr><td>4. Transcript identity</td><td>校验 toolCallId identity/conflict；readonly completed 结果可以回放</td><td>冲突或非只读重复 → <code>DUPLICATE_TOOL_CALL_BLOCKED</code></td></tr>
+<tr><td>5. Admission</td><td>普通模式非 readonly Tool 获取 durable claim；readonly/Skill 跳过。Persistent DAG 改用 planner fence</td><td>claim 冲突/不可确认 → fail closed</td></tr>
+<tr><td>6. Before execute</td><td>reserve in-flight counter、append <code>tool.call</code>；有 claim 时标记 dispatching</td><td>预算或持久化失败时不执行 Capability</td></tr>
+<tr><td>7. Execute/classify</td><td>Tool → Provider/CapabilityExecutor；Skill → invokeSkill；项目 Capability 如有业务不变量，应在自己的 Executor/Provider 内校验；完成后 commit/rollback counter</td><td>按 transient/permanent/unknown_write_outcome 分类；Runtime 不自动理解项目业务规则</td></tr>
+<tr><td>8. Evidence/result</td><td>追加 <code>tool.result</code> 或 <code>tool.error</code>，更新 claim 终态并格式化回传模型</td><td>由 failurePolicy 决定继续、收尾或终止</td></tr>
+</table>
+
+<h3>5.3 Durable claim、retry 与未知写结果</h3>
+<ul>
+<li>普通模式的非 readonly Tool 使用独立表 <code>falconcore_runtime_tool_dispatch_claims</code>；claim identity 为 runId + toolName + dedupeScope + normalized arguments，不含 toolCallId。</li>
+<li>readonly Tool 只有在 runtime retry policy 已配置且错误可重试时才重试，<code>maxAttempts</code> 封顶 3；write/dangerous 只尝试一次。</li>
+<li>超时来自 Capability exposure 的 <code>timeoutMs</code> 与 Run deadline，不存在统一默认 <code>maxToolMs</code>。</li>
+<li>非只读调用 dispatch 后被取消时可能成为 <code>unknown_outcome</code>：禁止自动重试，Run 失败，durable claim 保持待对账状态。</li>
+</ul>
+
+<h3>5.4 从 durable evidence 到用户可见结果</h3>
+<p>5.2 已经覆盖调用前门控、真实执行和 evidence 持久化。本节只描述后半段：一次调用通过 Dispatch，只能说明“允许执行且已经留下执行证据”，不自动说明模型随后组织的所有业务结论都正确。</p>
+
+<pre>durable tool.result / tool.error
+  ├─ 继续循环 → 回灌下一 model step → 主模型 synthesis
+  └─ 直接结束 → 形成 final candidate
+                         ↓
+              applyOutputTransformsForRun()
+                         ↓
+        配置的 output protocol transform（如启用）
+                         ↓
+        命中的已注册 RuntimeVisibleOutputPolicy（平台扩展）
+                         ↓
+              assistant.final / run.completed</pre>
+
+<table>
+<tr><th>层次</th><th>当前通用行为</th><th>项目需要自己提供什么</th></tr>
+<tr><td>Durable evidence</td><td><code>tool.result</code>/<code>tool.error</code> 记录真实执行结果；未知写结果禁止盲目重试</td><td>Capability 应返回足够、结构稳定且不伪造成功的业务证据</td></tr>
+<tr><td>Model synthesis</td><td>模型依据 Prompt、当前 Tool evidence 和 Response Contract instructions 组织回答</td><td>Prompt 说明事实边界；不能只靠 Prompt 做确定性安全校验</td></tr>
+<tr><td>Configured transform</td><td>按有效 Skill metadata 执行 reply-actions/output protocol 等已启用 transform</td><td>需要结构化协议时提供对应 Skill/transform；<code>metadata.responseContract.schema</code> 当前不会自动执行</td></tr>
+<tr><td>Visible Output Policy</td><td>全局注册的 policy 按 <code>appliesTo(run)</code> 自行命中，再执行 transform/脱敏/安全 fallback</td><td>只有确需确定性领域事实保护的项目才实现；Runtime 不自动生成业务规则</td></tr>
+<tr><td>Finalize</td><td>经过 transform 的 candidate 发布为 <code>assistant.final</code>，随后 Run 收敛终态</td><td>输出策略失败不能补发权限，也不能重放已执行的 write Tool</td></tr>
+</table>
+
+<div class="boundary"><strong>边界：</strong>Prompt 指导“应该怎样做”；5.2 的 Runtime Dispatch Gate 决定“能否调用”；命中的 RuntimeVisibleOutputPolicy 决定“最终能否作出某类业务断言”。三者不能互相替代，DAG admission 和输出策略都不能绕过真实业务写操作的当前轮 write-intent；非执行权 <code>plan_display</code> 例外不授予任何外部执行能力。</div>
+
+<h2>六、模型 Provider：路由、资源保护与流式提交</h2>
+
+<h3>6.1 从 ModelConfig 到一次 Provider 请求</h3>
+<pre>RuntimeBundle.model
+  → 解析 routes / providerBindingRefs
+  → ControlPlane reader 获取 ProviderBinding
+  → SecretStore 在调用阶段解析 credential
+  → 校验 provider/model/modality/availability
+  → ProviderQuotaGate(binding)
+  → ProviderOperationGuard(provider + account)
+  → create request / open stream
+  → usage、events、result 或分类错误</pre>
+<p>RuntimeBundle 只保存模型路由合同，不包含 credential。Secret 只在 Gateway 实际调用 Provider 时解析，也不会下发到 AgentInstance 或 Transcript。</p>
+
+<h3>6.2 候选遍历与错误分类</h3>
+<table>
+<tr><th>错误类别</th><th>当前处理</th><th>为什么</th></tr>
+<tr><td><code>request</code></td><td>立即失败，不切换候选</td><td>请求本身无效，换 account/model 不能修复</td></tr>
+<tr><td><code>binding</code> / <code>account</code> / <code>model</code></td><td>记录相应候选不可用，按候选范围继续</td><td>失败可能只影响当前 binding、account 或 model</td></tr>
+<tr><td><code>transient</code></td><td>在尚未提交输出且仍有候选/预算时，可以继续下一个候选</td><td>网络、429、5xx、并发限制或断路器可能是局部短暂故障</td></tr>
+<tr><td>abort、quota terminal、stream committed</td><td>停止 failover</td><td>取消必须及时传播；已提交流后切换会造成重复或不连续输出</td></tr>
+</table>
+
+<h3>6.3 两层资源保护</h3>
+<table>
+<tr><th>保护层</th><th>作用域</th><th>负责</th><th>不负责</th></tr>
+<tr><td><strong>ProviderQuotaGate</strong></td><td>Provider Binding</td><td>binding-scoped concurrency/rate admission 和等待</td><td>不分类 Provider 返回错误，不执行 Tool retry</td></tr>
+<tr><td><strong>ProviderOperationGuard</strong></td><td>provider + account scope</td><td>并发、队列深度、等待上限、transient circuit breaker 和 create-stage bounded retry</td><td>不改变路由合同，不允许 stream committed 后重放</td></tr>
+</table>
+
+<h3>6.4 流式提交边界</h3>
+<ul>
+<li>在首个对外可见流片段提交前，Provider 创建失败仍可以按候选和 retry 规则处理。</li>
+<li>一旦流已提交，后续错误必须沿当前流收敛，禁止无提示切换 Provider 后重新生成。</li>
+<li>Provider delta 先成为内部 streaming event；Chat Facade 再将允许的事件映射为对外 SSE。</li>
+<li>取消信号贯穿排队、Provider 请求与当前 Capability 执行；取消不是可自动 failover 的 transient error。</li>
+</ul>
+<div class="boundary"><strong>不要混淆：</strong>create-stage retry 是同一 Provider 操作的有界重试；binding/route failover 是切换候选；readonly Tool retry 属于第五章 Capability 执行。三者的作用域、停止条件和副作用风险不同。</div>
+
+<h2>七、正确性状态、并发一致性与故障恢复</h2>
+
+<h3>7.1 哪些状态决定正确性，哪些只是协调投影</h3>
+<p>第三章已经定义 Session、Run 和 Attempt。本章不再重复生命周期，而是说明故障时哪些状态可以推进业务事实。</p>
+<table>
+<tr><th>分类</th><th>状态</th><th>故障时的权限</th></tr>
+<tr><td>Durable correctness</td><td>RuntimeRun / RunAttempt</td><td>决定当前 owner、activeAttemptId、恢复资格和不可逆终态</td></tr>
+<tr><td>Durable correctness</td><td>Transcript tool.call/result/error</td><td>证明某次 Capability 是否产生可复用结果；模型文本不能替代</td></tr>
+<tr><td>Durable correctness</td><td>Tool dispatch claim</td><td>决定非只读副作用能否 admission、是否重复、是否 unknown_outcome</td></tr>
+<tr><td>Durable correctness</td><td>DAG plan/node state</td><td>决定固定 workflow 的 active node、transition 和恢复结果</td></tr>
+<tr><td>Online coordination</td><td>AgentInstance registration session / lease / capacity</td><td>决定当前 worker 是否可接 Run；失效只能触发受控恢复，不能伪造完成</td></tr>
+<tr><td>Online optimization</td><td>HotSession</td><td>只影响 preferred Instance 和定向排队；丢失后可重建</td></tr>
+<tr><td>Notification</td><td>Streaming events / completion signal</td><td>用于实时通知和短期协调；不替代 Run、Transcript 或 claim 终态</td></tr>
+</table>
+
+<h3>7.2 RuntimeRun 的恢复状态路径</h3>
+<pre>queued
+  └─ capacity reserved → assigned
+       └─ active Instance claim → running
+            ├─ normal completion → completed
+            ├─ execution failure → failed
+            ├─ explicit cancellation → cancelled
+            ├─ terminal recovery decision → interrupted
+            └─ lease lost → recovery_pending → queued（最多一次恢复）</pre>
+
+<p><code>completed</code>、<code>failed</code>、<code>interrupted</code>、<code>cancelled</code> 是不可逆终态。迟到结果可以作为审计证据保存，但不能重新推进 Run。</p>
+
+<h3>7.3 并发一致性保护</h3>
+<table>
+<tr><th>风险</th><th>保护</th></tr>
+<tr><td>两个 Gateway 同时分配容量</td><td>Redis Lua 原子 reserve/release；assignment 写入 SessionRunLedger</td></tr>
+<tr><td>旧 Instance/旧 attempt 提交结果</td><td>校验 AgentInstance registration <code>sessionId/tokenHash/registrationGeneration</code>，并要求提交的 <code>attemptId === activeAttemptId</code></td></tr>
+<tr><td>worker 崩溃后重复执行</td><td>lease reconciler、recovery count、Transcript identity、非只读 durable claim / DAG fence</td></tr>
+<tr><td>并行写扩大副作用</td><td>write/dangerous 顺序执行；DAG 禁止 parallel tools</td></tr>
+<tr><td>取消与 Tool dispatch 竞争</td><td>执行前可取消 claim；dispatch 后非只读结果不确定时进入 unknown_outcome</td></tr>
+<tr><td>多 Gateway SSE</td><td>Redis StreamingEventChannel；终态事件和 Run ledger 共同约束结束语义</td></tr>
+</table>
+
+<h3>7.4 Recovery 边界</h3>
+<ul>
+<li>每个 Run 被 claim 后才启动 cancellation monitor，并在该 attempt 结束时停止；它属于 attempt 生命周期，不是全局常驻任务。</li>
+<li>running Run 的 Instance lease 过期后可进入 <code>recovery_pending</code>，随后由 recovery 流程重新进入 queued。</li>
+<li>同一 Run 再次丢失 Instance 时进入 terminal interrupted，避免无限恢复和资源放大。</li>
+<li>普通执行 attempt 的上限不是无条件 claim retry；第二次 attempt 只用于特定 requeue/recovery 路径。</li>
+<li>任何恢复都不能自动重试 unresolved non-readonly side effect。</li>
+<li>Persistent DAG Recovery Coordinator 等待 run deadline、grace 与 claim expiry；没有已接纳调用或已有 durable terminal evidence 时才可安全重排。已接纳但缺少 durable terminal evidence 时标记 indeterminate 并中断，禁止盲目重放非只读调用。</li>
+</ul>
+
+<div class="boundary"><strong>资源放大边界：</strong>这些 gate 和状态顺序用于阻止重复执行、retry storm、replan storm、无限恢复和状态膨胀。恢复不能越过当前 owner fence，也不能把“尚无失败证据”误当成“可以安全重放非只读调用”。</div>
+
+<h2>八、持久化、可观测性与代码导航</h2>
+
+<h3>8.1 PostgreSQL 与 Redis</h3>
+<table>
+<tr><th>存储</th><th>权威数据</th><th>不应承担</th></tr>
+<tr><td><strong>PostgreSQL</strong></td><td>Agent snapshots/deployments、RuntimeRun/attempt、Transcript、Planner DAG plan、durable tool-dispatch claims、Memory/UserPreferences、Channel delivery/audit</td><td>高频 lease 心跳和容量计数</td></tr>
+<tr><td><strong>Redis</strong></td><td>Instance online/lease/capacity、HotSession、StreamingEventChannel、短期 completion signal/coordination</td><td>不可替代 Run/Transcript/claim 的持久化事实</td></tr>
+</table>
+<div class="boundary"><strong>Session 持久化口径：</strong>逻辑 Chat Session 不是单独的一行“Session 记录”；它由 RuntimeRun 中的 <code>agentId/user/threadId</code> Chat Scope 和对应 Transcript 共同表达。Redis HotSession 只缓存该逻辑 Session 的 preferred Instance，AgentInstance registration session 则只表达 worker 在线所有权，三者不能互相替代。</div>
+
+<h3>8.2 运行证据与排障信号</h3>
+<table>
+<tr><th>信号</th><th>能够证明</th><th>不能单独证明</th></tr>
+<tr><td>RuntimeRun / Attempt</td><td>状态、assignment、owner、时间和终态</td><td>模型实际看到的 Prompt 或 Tool 返回内容</td></tr>
+<tr><td>Prompt assembly diagnostics</td><td>哪些 Prompt/Skill instructions 被 included、suppressed 或去重</td><td>Capability 已经执行</td></tr>
+<tr><td>Effective Capability snapshot</td><td>当前 Run/iteration 的 registered、available、exposed surface</td><td>模型一定选择了其中某项能力</td></tr>
+<tr><td>Transcript tool.call/result/error</td><td>调用身份、真实结果或失败证据</td><td>非只读 unknown outcome 已完成或可安全重试</td></tr>
+<tr><td>Tool claim / DAG node state</td><td>副作用 admission、dedupe、node transition 和恢复状态</td><td>用户写授权；授权仍由第五章 write-intent gate 决定</td></tr>
+<tr><td>Streaming events</td><td>执行期间的活动与对外进度</td><td>不可替代 ledger/Transcript 的权威终态</td></tr>
+</table>
+<div class="note"><strong>推荐排障顺序：</strong>先确认 Run 固定 revision 和当前 Attempt owner，再检查 Prompt diagnostics 与 effective surface，然后检查 Transcript/claim/DAG evidence，最后定位 Provider、Executor 或 output transform。不要从最终模型文本反推内部动作一定发生。</div>
+
+<h3>8.3 按生命周期排列的关键代码入口</h3>
+<table>
+<tr><th>领域</th><th>文件</th><th>关键入口</th></tr>
+<tr><td>服务入口</td><td><code>src/control-plane-server.ts</code><br><code>src/runtime-gateway-server.ts</code><br><code>src/agent-instance-server.ts</code><br><code>src/channel-ingress-server.ts</code></td><td>各 <code>start*Server()</code></td></tr>
+<tr><td>Agent Config</td><td><code>agent-config/application/agent-config-types.ts</code><br><code>agent-config-validation.ts</code><br><code>runtime-gateway/application/runtime-bundle.ts</code></td><td>Draft/Publish 合同、校验、<code>createRuntimeBundle()</code></td></tr>
+<tr><td>Capability 开发</td><td><code>capabilities/application/default-capability-definitions.ts</code><br><code>default-capability-executors.ts</code><br><code>default-capability-availability.ts</code></td><td>Definition、Executor、依赖与 availability</td></tr>
+<tr><td>Session 身份与输入</td><td><code>runtime-gateway/application/runtime-agent-io-contract.ts</code><br><code>channel-ingress/application/channel-ingress-gateway-adapter.ts</code></td><td><code>runtimeChatSessionKey()</code>、Channel 输入规范化与幂等 Run 创建</td></tr>
+<tr><td>Run 调度与 HotSession</td><td><code>runtime-gateway/application/runtime-gateway.ts</code><br><code>session-run-ledger.ts</code><br><code>hot-session-store.ts</code></td><td><code>createRun()</code>、reserve/assign/claim/complete、preferred Instance 与 reassignment</td></tr>
+<tr><td>Instance 注册与执行</td><td><code>agent-instance/application/agent-instance-registry.ts</code><br><code>agent-instance/application/agent-instance-runtime.ts</code></td><td>registration session/lease/heartbeat、<code>executeAssignedRun()</code></td></tr>
+<tr><td>Session 历史与 Context</td><td><code>runtime-gateway/application/session-context-history-view.ts</code><br><code>session-context-assembler.ts</code><br><code>runtime-run-persistence.ts</code></td><td>按 Chat Scope 聚合 Run/Transcript、清洗 canonical history、<code>assemble()</code> 与 compaction</td></tr>
+<tr><td>Session 控制</td><td><code>runtime-gateway/deps/runtime-entrypoint-wiring.ts</code><br><code>session-yield-store.ts</code><br><code>session-yield-reconciler.ts</code></td><td><code>sessions_send/spawn/yield/abort</code> wiring、durable wait 与 parent resume Run</td></tr>
+<tr><td>Agent Invocation 入口</td><td><code>runtime-gateway/application/runtime-run-proxy.ts</code><br><code>runtime-capability-harness.ts</code><br><code>runtime-capability-harness-policy.ts</code></td><td>Direct Provider、<code>tryRunCapabilityHarness()</code>、<code>runBoundedCapabilityHarness()</code></td></tr>
+<tr><td>Tool Scope Resolver</td><td><code>runtime-tool-scope-resolver.ts</code><br><code>planner/application/runtime-planner-dag-*</code></td><td><code>resolveRuntimeToolScopeStep()</code>、DAG resolve/transition</td></tr>
+<tr><td>展示计划</td><td><code>capabilities/application/default-capability-definitions.ts</code><br><code>default-capability-executors.ts</code></td><td><code>update_plan</code> → <code>PlanProvider.update()</code>；不推进 DAG</td></tr>
+<tr><td>Capability</td><td><code>runtime-capability-execution-service.ts</code><br><code>capabilities/application/tool-skill-*</code></td><td><code>dispatchNativeToolCall()</code>、Registry/Executor</td></tr>
+<tr><td>可见输出校验</td><td><code>runtime-visible-output-policy.ts</code><br><code>runtime-output-transforms.ts</code></td><td><code>applyOutputTransformsForRun()</code>、<code>RuntimeVisibleOutputPolicy</code> 平台扩展接口；DMM 实例见第九章</td></tr>
+<tr><td>Provider</td><td><code>runtime-gateway/adapters/default-provider-adapter.ts</code><br><code>provider-operation-retry.ts</code><br><code>provider-quota-gate.ts</code></td><td>route/failover/guard/quota</td></tr>
+<tr><td>流式与服务端终态</td><td><code>control-plane/http/runtime-run-stream-terminal-publisher.ts</code><br><code>realtime/application/streaming-event-channel.ts</code></td><td>失败 Run 的终态流事件、跨 Gateway SSE 协调</td></tr>
+<tr><td>MCP</td><td><code>capabilities/mcp/mcp-capability-provider.ts</code><br><code>capabilities/mcp/mcp-runtime-exposure.ts</code></td><td>discovery、safe name、per-Run exposure、execute</td></tr>
+</table>
+
+<h2>九、当前实现边界与平台扩展示例</h2>
+
+<h3>9.1 已实现、条件启用与设计态</h3>
+<table>
+<tr><th>能力</th><th>状态</th><th>准确口径</th></tr>
+<tr><td>普通主模型 Capability Harness</td><td><span class="tag implemented">已实现</span></td><td>默认可选的工具路径；只有 payload 未关闭、模型支持 native tools、Registry 可用且存在有效 Capability surface 时接管，主模型在该 surface 内拥有选择权</td></tr>
+<tr><td>Persistent DAG Resolver</td><td><span class="tag conditional">条件启用</span></td><td>已实现；发布配置和本轮请求命中才执行</td></tr>
+<tr><td>MCP、subagents/sessions_spawn</td><td><span class="tag implemented">已实现</span></td><td>共享 Capability 执行管线</td></tr>
+<tr><td>ExecutionRun/Plan/Step 三表 Planned 模式</td><td><span class="tag design">设计中</span></td><td>当前 DAG 不是该数据模型</td></tr>
+<tr><td>固定目标 Deployment 的 CallableAgent RPC</td><td><span class="tag design">设计中</span></td><td>不得与当前 subagent 派生会话混同</td></tr>
+</table>
+
+<div class="note"><strong>当前工作区核对：</strong>未发现 <code>src/vnext/execution/</code>、ExecutionRun/ExecutionPlan/ExecutionStep store 或对应 PostgreSQL 表；因此 Planned 在本文继续按设计态标记。若实现位于其他分支，应在实现同步后再更新本表，不能只依据设计文档改为已实现。</div>
+
+<h3>9.2 RuntimeVisibleOutputPolicy 平台扩展合同</h3>
+<p><code>RuntimeVisibleOutputPolicy</code> 是 RuntimeGateway 的通用最终输出扩展点，不是 AgentConfig 字段。Policy 由平台代码注册，在 <code>applyOutputTransformsForRun()</code> 阶段按 Run 自行判断是否适用。</p>
+<pre>final candidate
+  → configured output protocol transform（如有）
+  → 遍历已注册 RuntimeVisibleOutputPolicy
+       ├─ appliesTo(run) = false → 跳过
+       └─ appliesTo(run) = true  → transform(run, value)
+  → assistant.final</pre>
+<table>
+<tr><th>扩展点</th><th>职责</th><th>必须避免</th></tr>
+<tr><td><code>registerRuntimeVisibleOutputPolicy()</code></td><td>在 Gateway composition 中注册确定性输出策略</td><td>不能由 Agent Prompt 动态注册</td></tr>
+<tr><td><code>appliesTo(run)</code></td><td>按 Agent/Capability/Run 元数据精确限定作用域</td><td>不能把单一项目规则无条件应用到所有 Agent</td></tr>
+<tr><td><code>transform()</code></td><td>依据已持久化 evidence 做脱敏、事实复验或安全 fallback</td><td>不能补授 Tool 权限，也不能伪造或重放外部动作</td></tr>
+</table>
+
+<h3>9.3 DMM 领域实现示例</h3>
+<p>DMM 展示如何接入上述通用 registry/transform 管线，不表示 DMM 规则属于 AgentConfig，也不表示其业务规则对所有 Agent 生效。<code>DMM_VISIBLE_OUTPUT_POLICY</code> 在 Gateway 启动时注册，<code>appliesTo()</code> 只在本轮 <code>bundle.tools</code> 中存在 enabled 的 <code>dmm_</code> Tool 时命中。</p>
+
+<pre>用户询问“当前价格”
+  → 本轮 effective directory 暴露 DMM Tool
+  → 模型调用 Tool，5.2 完成权限、参数、执行和 evidence 持久化
+  → 模型依据返回结果生成 final candidate
+  → DMM_VISIBLE_OUTPUT_POLICY 检查当前商业事实 evidence
+       ├─ 有 product card / intent + evidence items → 保留受支持结论
+       └─ 没有本轮新证据 → 替换为安全 fallback，要求重新查询</pre>
+
+<table>
+<tr><th>DMM 可见结论</th><th>要求的当前轮证据</th><th>证据不足时</th></tr>
+<tr><td>当前价格、商品或商业事实</td><td>DMM product card，或 <code>products_listed</code>/<code>product_loaded</code> intent 且包含 <code>authoritative_items</code>、<code>display_items</code> 或 <code>list</code></td><td><code>hasCurrentCommercialFactEvidence()</code> 返回 false，当前事实断言替换为安全 fallback</td></tr>
+<tr><td>当前预约时段或可用性</td><td>appointment-slot card，或 <code>appointment_slots_loaded</code> intent 且包含 <code>display_items</code>、<code>available_slots</code>、<code>unavailable_slots</code>、<code>slots</code> 或 <code>list</code></td><td><code>hasCurrentAvailabilityEvidence()</code> 返回 false，不允许仅凭模型文本声称“有/无可用时段”</td></tr>
+<tr><td>覆盖、可服务或可下单结论</td><td>coverage flags，或经过校验的 <code>coverage_checked</code> intent + authoritative address card</td><td><code>hasCurrentCoverageEvidence()</code> 返回 false，输出受控说明</td></tr>
+<tr><td>语言、内部标识与展示协议</td><td>项目允许展示的结构化字段和当前 response rules</td><td>执行语言修复、内部标识脱敏或确定性 fallback</td></tr>
+</table>
+
+<p><strong>精确说明：</strong><code>hasDmmPresentationIntent()</code> 只递归识别结构化 presentation intent；“当前价格/商品”和“当前可用性”的放行还必须有对应 card，或 intent 中存在实际 evidence items。仅有 intent 名称不能证明当前事实。</p>
+
+<div class="example"><strong>平台扩展方式：</strong><code>RuntimeVisibleOutputPolicy</code> 是 RuntimeGateway 通用扩展点，不是新 Agent 的必配项。只有平台侧确实需要确定性可见输出处理时，才注册 Policy，并通过 <code>appliesTo(run)</code> 精确限定作用域。不要把 DMM 的字段、正则或 fallback 提升为所有 Agent 的全局规则。</div>
+
+<hr style="margin:48px 0 24px;border:0;border-top:2px solid var(--border)">
+<p class="small" style="text-align:center">FalconCore Runtime Architecture｜本文档描述当前代码行为；设计稿能力已单独标记。</p>
+
+</body>
+</html>
