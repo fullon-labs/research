@@ -2,7 +2,7 @@
 
 调研日期：2026-10-09。仅做调研，未注册、安装、付费或联系任何一方。
 "已核实"= 本次在官方页面/GitHub 页面看到；"未核实"= 仅第三方或未能确认。
-**falcon 列：Thor 自行填写（本文不对 falcon 内部做任何判断）。**
+**falcon 列：依据 falcon-core 仓库的 README 与架构/运行时/安全文档整理，仅写高层能力；未读源码实现，未公开说明的项不写。**
 
 ## 一、为什么 Muse / dots 用不了
 - Muse（Meta）：目前仅美国、加拿大（第三方报道，未在官方页确认完整国家列表）。https://about.fb.com/news/2026/09/introducing-muse-personal-ai-agent/ ；区域说明：https://www.aiagentslibrary.com/blog/meta-muse-availability/
@@ -25,18 +25,19 @@
 | Dify | 低代码 agent / 工作流 / RAG 平台 | https://github.com/langgenius/dify | 自托管免费 | 本地/私有化，不受区域限制 | API、插件、MCP（未核实细节） | 改良版 Apache-2.0，附加商用条件（如多租户限制），需读 LICENSE | 成熟，社区大 |
 | Kimi Agent（OK Computer）| 通用云端 agent 产品 | https://www.kimi.com/en/help/agent/agent-overview | 网页/App 使用；免费额度与收费（未核实） | 国内可用 | 产品使用为主；Kimi K2 模型开放（API 付费情况未核实） | 产品闭源；K2 权重开放 | 2025-09 起，持续迭代 |
 | Manus | 通用云端 agent | https://manus.im ；香港 App Store 有上架 https://apps.apple.com/hk/app/manus-ai/id6740909540 | 免费 + 内购积分 | 香港 App Store 可见；有报道称官网对部分地区显示 "not available in your region"，大陆可用性未核实 | 产品使用为主 | 闭源 | 较成熟，但区域政策易变 |
+| falcon（Thor 团队私有框架） | 私有 agent 运行平台：控制面 + RuntimeGateway + AgentInstance | 私有仓库，不公开链接 | 内部使用 | 自托管，不受区域限制 | 渠道入口 HTTP 接口、Runtime Instance API、MCP 工具接入（具体对外范围暂不公开说明） | 私有 | 自用生产环境 |
 | LangGraph / CrewAI / OpenAI Agents SDK | 通用 agent 编排框架（与 falcon 最可比） | https://github.com/langchain-ai/langgraph 等；对比文：https://effloow.com/articles/ai-agent-frameworks-compared-2026 | 免费 | 本地，不受区域限制 | 第三方称主流 Python 框架均原生支持 MCP | LangGraph: MIT；其余未逐一核实 | 成熟 |
 
 ## 三、与通用 agent 框架的对比维度（falcon 列由 Thor 填）
 
 | 维度 | OpenClaw | Hermes | Goose | OpenHands | Qwen-Agent | Coze Studio / Dify | falcon |
 |---|---|---|---|---|---|---|---|
-| 编排 | 单 gateway + 渠道 | 单 agent + 子 agent 委派、定时 | 单 agent + 扩展 | 编码任务循环 + 沙箱 | 函数调用+工具循环 | 可视化工作流 | Thor to fill |
-| 工具 / MCP | 插件（MCP 未核实） | 工具/skill（MCP 未核实） | MCP 原生 | SDK 工具（MCP 未核实） | MCP 支持 | 插件/工作流（MCP 未核实） | Thor to fill |
-| 记忆 | 本地状态/记忆 | 持久记忆 + 自动 skill | 未核实 | 会话级为主（未核实） | RAG | 知识库 RAG | Thor to fill |
-| 多 agent | 未核实 | 隔离子 agent | 未核实 | 有（SDK，未核实细节） | 有（未核实细节） | 工作流内多节点 | Thor to fill |
-| 部署 | 自托管，多平台 | 自托管，Linux/macOS/Windows | 桌面/CLI | Docker/本地 | pip | Docker 自托管 | Thor to fill |
-| 安全 | 数据留本地，提示词发往所配模型商 | 未核实 | 本地执行，需自行限权 | 沙箱 | 代码解释器需隔离 | 私有化 | Thor to fill |
+| 编排 | 单 gateway + 渠道 | 单 agent + 子 agent 委派、定时 | 单 agent + 扩展 | 编码任务循环 + 沙箱 | 函数调用+工具循环 | 可视化工作流 | 控制面（Control Plane）发布 AgentConfig/部署；RuntimeGateway 接收请求、固定配置版本、调度在线 AgentInstance；会话粘性调度，有运行台账与恢复机制 |
+| 工具 / MCP | 插件（MCP 未核实） | 工具/skill（MCP 未核实） | MCP 原生 | SDK 工具（MCP 未核实） | MCP 支持 | 插件/工作流（MCP 未核实） | 原生工具/skill 注册；MCP 工具支持按需发现（tool_search，需在 Agent 配置里显式启用）；有代码执行模式（Code Mode） |
+| 记忆 | 本地状态/记忆 | 持久记忆 + 自动 skill | 未核实 | 会话级为主（未核实） | RAG | 知识库 RAG | Postgres 长期记忆，显式写入/检索；RuntimeGateway 目前不自动写入或检索长期记忆；会话摘要与上下文压缩 |
+| 多 agent | 未核实 | 隔离子 agent | 未核实 | 有（SDK，未核实细节） | 有（未核实细节） | 工作流内多节点 | 以 AgentInstance 为多实例/多 Agent 部署单元，由网关统一调度；agent 内子 agent 委派暂不公开说明 |
+| 部署 | 自托管，多平台 | 自托管，Linux/macOS/Windows | 桌面/CLI | Docker/本地 | pip | Docker 自托管 | 自托管；Docker/Kubernetes manifest 生成，AgentInstance 作为外部进程/容器运行；依赖 PostgreSQL + Redis；自动扩缩容为策略评估，不直接创建副本 |
+| 安全 | 数据留本地，提示词发往所配模型商 | 未核实 | 本地执行，需自行限权 | 沙箱 | 代码解释器需隔离 | 私有化 | 实例不持有模型密钥，模型/工具/skill 调用经 RuntimeGateway 代理；密钥加密存储；渠道入口鉴权与渠道身份信任（现支持 Telegram）；工具权限分级 |
 
 ## 四、建议（初步，供 Thor 判断）
 1. 想要"Muse/dots 式常驻个人 agent"体验：先看 OpenClaw、Hermes Agent（都是 MIT，本地运行）。
@@ -47,3 +48,4 @@
 
 ## 来源
 GitHub 页面：openclaw/openclaw、NousResearch/hermes-agent、aaif-goose/goose、OpenHands/OpenHands、RooCodeInc/Roo-Code、zai-org/Open-AutoGLM、QwenLM/Qwen-Agent、coze-dev/coze-studio、langgenius/dify、langchain-ai/langgraph；官方页：hermes-agent.nousresearch.com、goose-docs.ai、kimi.com 帮助中心；Muse/dots 官方与第三方页见第一节。
+
